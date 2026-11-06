@@ -316,7 +316,6 @@ struct PanelView: View {
     // otherwise a model you have never touched is invisible. A plain button
     // rather than DisclosureGroup: that one never took clicks in a
     // MenuBarExtra window.
-    @ViewBuilder
     private func allModels(_ data: UsageData) -> some View {
         let names = Limits.models()
         return VStack(alignment: .leading, spacing: 3) {

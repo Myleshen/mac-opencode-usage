@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # Universal, like the release: an arch-specific break must show up here,
+      # not on a user's Intel Mac.
+      - name: Build the universal app
+        run: ARCHS="arm64 x86_64" ./build.sh
+
+      - name: Self-test
+        run: ./build/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --selftest
+
+      - name: Both architectures are in the binary
+        run: lipo -archs build/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage | tee /dev/stderr | grep -q x86_64

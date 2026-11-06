@@ -1,40 +1,123 @@
 name: release
 
+# One release per merge to main: bump the patch, tag it, build a universal app,
+# publish OpenCodeUsage.zip and move the Homebrew cask forward. The bump commit
+# is pushed with GITHUB_TOKEN, which does not start another run.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the leading v (empty = next patch)
+        required: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-14
+    # A hand-made version bump on main should not be released twice.
+    if: "github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'release: v')"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Build universal app
+      - name: Pick the version
+        id: pick
+        env:
+          INPUT: ${{ inputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}" BUILD="$GITHUB_RUN_NUMBER" ARCHS="arm64 x86_64" ./build.sh
+          set -euo pipefail
+          if [ -n "${INPUT}" ]; then
+            version="${INPUT#v}"
+          else
+            latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+            [ -n "$latest" ] || { echo "no v* tag to bump from"; exit 1; }
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            version="$major.$minor.$((patch + 1))"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "v$version is already released, nothing to do"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump build.sh and tag
+        if: steps.pick.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i '' -E "s/VERSION:-[0-9]+\.[0-9]+\.[0-9]+/VERSION:-$VERSION/" build.sh
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet build.sh; then
+            git commit -am "release: v$VERSION"
+            git push origin HEAD:main
+          fi
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Build, self-test, zip
+        if: steps.pick.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$VERSION" BUILD="$GITHUB_RUN_NUMBER" ARCHS="arm64 x86_64" ./build.sh
           ./build/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --selftest
           lipo -archs build/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage
-
-      - name: Zip app
-        run: |
           cd build
           ditto -c -k --sequesterRsrc --keepParent OpenCodeUsage.app OpenCodeUsage.zip
           shasum -a 256 OpenCodeUsage.zip | tee ../sha256.txt
 
       - name: Publish
+        if: steps.pick.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pick.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "${GITHUB_REF_NAME#v}" \
+          set -euo pipefail
+          sha="$(cut -d' ' -f1 sha256.txt)"
+          gh release create "v$VERSION" \
+            --title "$VERSION" \
             --generate-notes \
             --notes-file - build/OpenCodeUsage.zip <<NOTES
           Unsigned build: right-click > Open the first time, or install with
           \`brew install --cask Myleshen/tap/opencode-usage\`.
 
-          sha256: $(cut -d' ' -f1 sha256.txt)
+          sha256: $sha
           NOTES
+
+      # Needs a fine-grained token with Contents: read and write on the tap;
+      # the default GITHUB_TOKEN cannot touch another repository.
+      - name: Update the Homebrew cask
+        if: steps.pick.outputs.skip == 'false'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning title=Homebrew cask not bumped::Set a TAP_TOKEN secret (fine-grained, Contents: read and write on Myleshen/homebrew-tap) so a release moves the cask. v$VERSION is published either way."
+            exit 0
+          fi
+          sha="$(cut -d' ' -f1 sha256.txt)"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/Myleshen/homebrew-tap.git" tap
+          cd tap
+          sed -i '' -E "s/^  version \".*\"$/  version \"$VERSION\"/" Casks/opencode-usage.rb
+          sed -i '' -E "s/^  sha256 \".*\"$/  sha256 \"$sha\"/" Casks/opencode-usage.rb
+          grep -qF "version \"$VERSION\"" Casks/opencode-usage.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "opencode-usage: $VERSION"
+          git push

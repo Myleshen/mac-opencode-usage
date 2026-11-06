@@ -271,14 +271,18 @@ this Mac's timezone.
 
 ## Releasing
 
-`.github/workflows/release.yml` builds a universal app, runs the self-test, zips
-it and publishes `OpenCodeUsage.zip` on a `v*` tag.
+Merging to `main` is the release. `.github/workflows/release.yml` bumps the
+patch version in `build.sh`, commits `release: vX.Y.Z`, tags it, builds a
+universal app, runs the self-test, publishes `OpenCodeUsage.zip` with its
+sha256 in the notes, and then bumps `version` + `sha256` in the cask in
+[Myleshen/homebrew-tap](https://github.com/Myleshen/homebrew-tap) — the pinned
+version is what lets users move forward with `brew upgrade --cask
+opencode-usage`. Tagging by hand is not needed; `workflow_dispatch` takes an
+explicit version if a patch bump is the wrong one.
 
-Then bump the cask in [Myleshen/homebrew-tap](https://github.com/Myleshen/homebrew-tap):
-`version "<tag without v>"` and `sha256` of the published asset (the hash is
-printed in the release notes). That pinned version is what lets users move
-forward with `brew upgrade --cask opencode-usage`; skip it and the tap keeps
-serving the old build.
+The cask step needs a `TAP_TOKEN` repository secret: a fine-grained token with
+**Contents: read and write** on the tap. Without it the release is still
+published and the workflow warns that the cask was left behind.
 
 Homebrew reads its own clone of the tap
 (`$(brew --repository)/Library/Taps/<user>/homebrew-tap`), not your working
@@ -290,3 +294,8 @@ git -C "$(brew --repository)/Library/Taps/myleshen/homebrew-tap" pull origin mai
 brew upgrade --cask opencode-usage
 plutil -p /Applications/OpenCodeUsage.app/Contents/Info.plist | grep ShortVersion
 ```
+
+## Contributing
+
+Build and test steps, the file layout, and the checks CI runs are in
+[CONTRIBUTING.md](CONTRIBUTING.md).

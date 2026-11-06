@@ -163,10 +163,12 @@ enum SelfTest {
         check(Usage.cap(unknown.models[0], .month) == nil, "no cap without a limit")
         check(Usage.top(unknown, .month) == nil, "no percentage without a limit")
 
-        // The Go table must be complete: every model has a positive limit.
-        let goModels = Limits.models()
-        check(goModels.count == 28, "28 models in the Go table")
-        check(goModels.allSatisfy { (Limits.value(model: $0) ?? 0) > 0 }, "every model has a limit")
+        // Assert the compiled fallback, not the live table: the docs fetch is
+        // cached per user and grows whenever OpenCode ships a model, so tying
+        // the test to its count fails on a machine that has refreshed since.
+        check(Limits.bundled.count == 28, "28 models in the bundled Go table")
+        check(Limits.bundled.values.allSatisfy { $0 > 0 }, "every bundled model has a limit")
+        check(Limits.models().allSatisfy { (Limits.value(model: $0) ?? 0) > 0 }, "every active model has a limit")
         check(Limits.value(model: "deepseek-v4.1-flash") == 100, "go limit")
         check(Limits.value(model: "nope") == nil, "unknown model has no limit")
 

@@ -1,0 +1,64 @@
+name: Bug report
+description: Something shows the wrong number, crashes, or will not install
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run the self-test first: `./build/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --selftest`
+        (or `/Applications/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --selftest`).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you expected, and what the app did instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings footer, or `plutil -p /Applications/OpenCodeUsage.app/Contents/Info.plist | grep ShortVersion`
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Apple menu > About This Mac, or `sw_vers -productVersion`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it was installed
+      options:
+        - Homebrew cask (brew install --cask Myleshen/tap/opencode-usage)
+        - Downloaded OpenCodeUsage.zip from a release
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Self-test output
+      description: Paste the last lines. `selftest ok` or the failing checks.
+      render: shell
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Which numbers are wrong
+      description: The panel names its source; `--limits` shows whether the console meters are in use.
+      multiple: true
+      options:
+        - 5-hour / weekly / monthly meters
+        - Per-model spend
+        - Available credits / credits used
+        - Menu bar figure
+        - Something else
