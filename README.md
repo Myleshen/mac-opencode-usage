@@ -7,8 +7,9 @@ now. Port of the Noctalia plugin from my dotfiles.
 
 The menu bar shows the gauge and three figures — `H 5% W 13% M 14%` — the
 same percentages the console dashboard shows, with the console's own reset
-times. Any combination can be turned off in settings; click for per-model
-spend, requests and tokens.
+times. Optionally add `C 17%` for the credit-usage percentage. Any
+combination can be turned off in settings; click for per-model spend, requests
+and tokens.
 
 The figures come from the console's meter when opencode is signed in to a
 console workspace, and fall back to sums of the usage API otherwise (see
@@ -106,7 +107,7 @@ Open the panel, click the gear.
 | --- | --- | --- |
 | Refresh | 10 min | Timer keeps running while the panel is closed. |
 | Warn / critical | 80% / 95% | Panel color and warning triangle. |
-| Menu bar | H + W + M | Which figures to show. |
+| Menu bar | H + W + M | Which figures to show; add C for the credit-usage percentage. |
 | Launch at login | off | Writes and registers `~/Library/LaunchAgents/dev.myleshen.opencode-usage.plist`. |
 | Quit | — | Button at the bottom of settings; a MenuBarExtra has no Quit item of its own. |
 
@@ -169,6 +170,37 @@ materially (9% vs the console's 14% on the same account), so it is never silent.
 `./OpenCodeUsage --limits` prints the raw meter response, which is how to tell
 which source is in use.
 
+## Available credits
+
+The Go plan's included allowance is separate from the prepaid balance that pays
+for managed-inference (Zen) usage. The panel therefore shows two credit cards,
+**Available credits** and **Credits used** (`$4.24` and a percentage in the
+example above), from:
+
+```
+GET /console/api/billing/status
+GET /console/api/billing/payment-attempts
+```
+
+The same OpenCode Go key authorises both, and amounts are converted the same
+way as usage costs (`micro-cents / 1e8`). `availableMicroCents` is what the
+console calls "Available credits"; `available` already accounts for a credit
+limit, so it is shown instead of the raw ledger balance.
+
+There is no "total credits" field in the status payload, so the used percentage
+is built from the purchase history: the sum of **succeeded** `credit_purchase`
+attempts is 100%, and `used = purchased − available`. Failed attempts and Go
+subscription payments (`go_initial`) are ignored. On an invoiced workspace
+`creditLimitMicroCents` is used as the denominator instead. Without either
+total (no purchase history, no limit) the second card shows `—` rather than
+inventing a percentage. The response's `mode` (`pay-as-you-go`, `prepaid`,
+`invoice`) is printed below the balance and in **Details**.
+
+Both billing fetches are deliberately best-effort: a workspace with no billing
+account, or a key without access to the billing route, leaves the cards hidden
+instead of failing the Go refresh. `--dump` prints `available credits —` and
+omits the used line in that case.
+
 ## How it works
 
 1. Asks the CLI for the active Go credential (`opencode auth export`) rather
@@ -182,6 +214,9 @@ which source is in use.
    one call with no `since` for lifetime totals. Filters `provider ==
    "opencode-go"` and converts `totalCostMicroCents / 1e8` to USD. These sums
    drive the per-model cards, and the bar only when step 2 has no meter.
+4. `GET /console/api/billing/status` and `/billing/payment-attempts` for the
+   **Available credits** and **Credits used** cards. Best-effort, so a
+   workspace without billing simply hides those cards.
 
 ### Why there are no weekly or monthly dollar figures
 

@@ -59,6 +59,43 @@ struct UsageData {
     // Percentages straight from the console's own meters, when opencode has a
     // linked console workspace. nil means the console API numbers are used.
     var meters: Meters?
+    // Prepaid balance for managed inference (Zen). nil when the workspace has
+    // no billing account, or when the billing route is unreachable.
+    var credits: Credits?
+}
+
+// /console/api/billing/status. The amounts are micro-cents, like the usage
+// API's costs, so 1e8 of them is one dollar.
+struct Credits {
+    let available: Double
+    let balance: Double
+    // "pay-as-you-go", "prepaid", or "invoice".
+    let mode: String?
+    let canPurchase: Bool
+    // Total successfully purchased, from /billing/payment-attempts. nil when
+    // there is no purchase history to compare against.
+    let purchased: Double?
+    // An invoiced workspace's limit; nil on prepaid, where `purchased` is the
+    // only denominator available.
+    let limit: Double?
+
+    // What 100% means: the credit limit when one exists, otherwise everything
+    // bought so far. The console exposes no other "total" for prepaid.
+    var basis: Double? {
+        if let limit, limit > 0 { return limit }
+        if let purchased, purchased > 0 { return purchased }
+        return nil
+    }
+
+    var used: Double? {
+        guard let basis else { return nil }
+        return min(max(basis - available, 0), basis)
+    }
+
+    var usedFraction: Double? {
+        guard let used, let basis, basis > 0 else { return nil }
+        return used / basis
+    }
 }
 
 // UsageLimits.Go from opencode's server: the numbers the console itself shows.
@@ -213,7 +250,7 @@ enum Usage {
         return nil
     }
 
-    static func request(_ url: URL, key: String) async throws -> [String: Any] {
+    static func send(_ url: URL, key: String) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -230,10 +267,23 @@ enum Usage {
             }
             throw Failure("HTTP \(status) from the usage API: \(body.prefix(180))")
         }
+        return data
+    }
+
+    static func request(_ url: URL, key: String) async throws -> [String: Any] {
+        let data = try await send(url, key: key)
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw Failure("Could not parse the usage API response.")
         }
         return object
+    }
+
+    static func rows(_ url: URL, key: String) async throws -> [[String: Any]] {
+        let data = try await send(url, key: key)
+        guard let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw Failure("Could not parse the billing API response.")
+        }
+        return rows
     }
 
     // Ask the CLI instead of reading its database: `auth export` is the
@@ -308,6 +358,57 @@ enum Usage {
             guard next < count else { return items }
             page = next + 1
         }
+    }
+
+    // MARK: - Credits
+
+    // Supplementary, so every failure is nil instead of an error: a workspace
+    // without billing must not turn a working Go refresh into a failed one.
+    static func credits(key: String) async -> Credits? {
+        guard let statusURL = URL(string: api + "/billing/status") else { return nil }
+        async let status = try? request(statusURL, key: key)
+        async let bought = creditPurchases(key: key)
+        guard let body = await status else { return nil }
+        return credits(from: body, purchased: await bought)
+    }
+
+    // The billing status carries the balance; the payment attempts are what
+    // turn it into a "used" percentage, because prepaid has no total of its own.
+    static func credits(from body: [String: Any], purchased: Double? = nil) -> Credits? {
+        // `availableMicroCents` is what the console calls "Available credits";
+        // it already accounts for a credit limit, so prefer it to the ledger
+        // balance when both are present.
+        guard let available = number(body["availableMicroCents"]) else { return nil }
+        let balance = number(body["balanceMicroCents"]) ?? available
+        let limit = number(body["creditLimitMicroCents"])
+        return Credits(
+            available: available / 100_000_000,
+            balance: balance / 100_000_000,
+            mode: body["mode"] as? String,
+            canPurchase: body["canPurchaseCredits"] as? Bool ?? false,
+            purchased: purchased,
+            limit: limit.map { $0 / 100_000_000 }
+        )
+    }
+
+    // Sum only purchases that actually succeeded. Failed attempts stay in the
+    // list ($10 in the fixture below), and Go subscription payments are a
+    // different product, so neither belongs in the credit denominator.
+    static func creditPurchases(from rows: [[String: Any]]) -> Double? {
+        let amounts = rows
+            .filter {
+                $0["attemptType"] as? String == "credit_purchase"
+                    && $0["status"] as? String == "succeeded"
+            }
+            .compactMap { number($0["amountMicroCents"]) }
+        guard !amounts.isEmpty else { return nil }
+        return amounts.reduce(0, +) / 100_000_000
+    }
+
+    static func creditPurchases(key: String) async -> Double? {
+        guard let url = URL(string: api + "/billing/payment-attempts") else { return nil }
+        guard let list = try? await rows(url, key: key) else { return nil }
+        return creditPurchases(from: list)
     }
 
     // MARK: - Aggregation
@@ -387,6 +488,7 @@ enum Usage {
         ]
 
         async let lifetimeRows = models(since: nil, key: key)
+        async let creditStatus = credits(key: key)
 
         var windows: [Period: [[String: Any]]] = [:]
         try await withThrowingTaskGroup(of: (Period, [[String: Any]]).self) { group in
@@ -420,6 +522,7 @@ enum Usage {
         }
         data.models = byId.values.sorted { $0.total > $1.total }
         data.meters = metersFromCLI()
+        data.credits = await creditStatus
         return data
     }
 
@@ -491,6 +594,10 @@ enum Usage {
         }
         lines.append("today \(money(data.today))")
         lines.append("all time \(money(data.lifetimeTotal)) · \(data.lifetimeRequests) req")
+        lines.append("available credits \(data.credits.map { money($0.available) } ?? "—")")
+        if let credits = data.credits, let used = credits.usedFraction, let spent = credits.used, let basis = credits.basis {
+            lines.append("credits used \(percent(used)) · \(money(spent)) of \(money(basis))")
+        }
         lines.append("limits \(Limits.count) models (\(Limits.isDynamic ? "docs" : "bundled"))")
         if let meter = data.meters?.five {
             lines.append("5h meter: \(percent(meter.value(.five))) from the console, resets \(meter.resetsAt?.description ?? "unknown")")

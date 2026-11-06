@@ -73,6 +73,39 @@ enum SelfTest {
         withLifetime.lifetimeRequests = 1234
         check(Usage.describe(withLifetime).contains("all time $12.5 · 1234 req"), "lifetime line in dump")
 
+        // Billing status: micro-cents, and `available` can differ from the
+        // ledger balance on an invoiced workspace.
+        let billing: [String: Any] = [
+            "availableMicroCents": "426850414",
+            "balanceMicroCents": "500000000",
+            "mode": "pay-as-you-go",
+            "canPurchaseCredits": true,
+        ]
+        let credits = Usage.credits(from: billing, purchased: 5)
+        check(abs((credits?.available ?? 0) - 4.26850414) < 0.00000001, "available credits from microcents")
+        check(abs((credits?.balance ?? 0) - 5) < 0.00000001, "credit balance from microcents")
+        check(abs((credits?.used ?? 0) - 0.73149586) < 0.00000001, "credits used")
+        check(abs((credits?.usedFraction ?? 0) - 0.146299172) < 0.00000001, "credits used fraction")
+        check(credits?.mode == "pay-as-you-go", "credits mode")
+        check(credits?.canPurchase == true, "credits purchasable")
+        check(Usage.credits(from: ["balanceMicroCents": "1"]) == nil, "available credits required")
+
+        // Only succeeded credit purchases form the denominator: failed
+        // attempts and Go subscription payments are different money.
+        let attempts: [[String: Any]] = [
+            ["attemptType": "credit_purchase", "status": "succeeded", "amountMicroCents": "500000000"],
+            ["attemptType": "credit_purchase", "status": "failed", "amountMicroCents": "1000000000"],
+            ["attemptType": "go_initial", "status": "succeeded", "amountMicroCents": "1000000000"],
+        ]
+        check(Usage.creditPurchases(from: attempts) == 5, "only succeeded credit purchases count")
+        check(Usage.creditPurchases(from: [["attemptType": "go_initial", "status": "succeeded"]]) == nil,
+              "go payments are not credits")
+
+        var withCredits = data
+        withCredits.credits = credits
+        check(Usage.describe(withCredits).contains("available credits $4.27"), "credits line in dump")
+        check(Usage.describe(withCredits).contains("credits used 15% · $0.73 of $5.00"), "credits used line in dump")
+
         // Sorted by month-of-limit: 50/100 = 50%, then 15/15 = 100% would win,
         // so check the 100% model comes first.
         check(data.models.first?.id == "glm-5.3", "sorts by monthly utilization")

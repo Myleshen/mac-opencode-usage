@@ -87,6 +87,8 @@ struct PanelView: View {
                 summaryCard("Monthly", Usage.top(data, .month), note: resetNote(data.meters?.month))
             }
 
+            creditsCards(data.credits)
+
             if let error = store.error {
                 banner("Refresh failed; showing previous data.", detail: error)
             }
@@ -155,6 +157,58 @@ struct PanelView: View {
     private func resetNote(_ meter: Meters.Meter?) -> String? {
         guard let at = meter?.resetsAt else { return nil }
         return "resets " + clock.string(from: at) + " " + Usage.offset
+    }
+
+    // The Go plan's meters are percentages of an allowance; managed inference
+    // is paid from a separate prepaid balance. Two cards keep the two
+    // questions apart: how much is left, and how much of what was bought is
+    // already gone.
+    @ViewBuilder
+    private func creditsCards(_ credits: Credits?) -> some View {
+        if let credits {
+            HStack(spacing: 10) {
+                creditCard(
+                    "Available credits",
+                    Usage.money(credits.available),
+                    note: credits.mode.map { "\($0) · managed inference usage" }
+                        ?? "Credits available for managed inference usage"
+                )
+
+                if let used = credits.usedFraction,
+                   let spent = credits.used,
+                   let basis = credits.basis {
+                    creditCard(
+                        "Credits used",
+                        Usage.percent(used),
+                        note: "\(Usage.money(spent)) of \(Usage.money(basis)) · \(Usage.percent(1 - used)) free",
+                        color: usageColor(used, warning: store.warning, critical: store.critical)
+                    )
+                } else {
+                    creditCard(
+                        "Credits used",
+                        "—",
+                        note: "No credit purchases found to compare against"
+                    )
+                }
+            }
+        }
+    }
+
+    private func creditCard(_ title: String, _ value: String, note: String, color: Color = .primary) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(color)
+            Text(note)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.06)))
     }
 
     private func summaryNote(_ top: Usage.Top?) -> String? {
@@ -230,6 +284,13 @@ struct PanelView: View {
             // Lifetime, not "this month": the API clamps `since` to about three
             // days, so any month figure would be a three-day total in disguise.
             detailRow("All time", Usage.money(data.lifetimeTotal) + " · " + Usage.compact(data.lifetimeRequests) + " req")
+            if let credits = data.credits {
+                detailRow("Available credits", Usage.money(credits.available))
+                if let used = credits.usedFraction, let spent = credits.used, let basis = credits.basis {
+                    detailRow("Credits used", "\(Usage.percent(used)) · \(Usage.money(spent)) of \(Usage.money(basis))")
+                }
+                if let mode = credits.mode { detailRow("Credits mode", mode) }
+            }
             if let meter = data.meters?.five {
                 detailRow("5h resets", reset(meter))
                 // In metered mode every other time above is a future reset, so
@@ -327,6 +388,7 @@ struct SettingsView: View {
     @AppStorage("barFive") private var barFive = true
     @AppStorage("barWeek") private var barWeek = true
     @AppStorage("barMonth") private var barMonth = true
+    @AppStorage("barCredits") private var barCredits = false
     @State private var loginError: String?
     @State private var launchAtLogin = LoginItem.enabled
 
@@ -355,6 +417,7 @@ struct SettingsView: View {
                 Toggle("H", isOn: $barFive).toggleStyle(.checkbox)
                 Toggle("W", isOn: $barWeek).toggleStyle(.checkbox)
                 Toggle("M", isOn: $barMonth).toggleStyle(.checkbox)
+                Toggle("C", isOn: $barCredits).toggleStyle(.checkbox)
             }
 
             Toggle("Launch at login", isOn: $launchAtLogin)
