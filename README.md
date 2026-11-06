@@ -271,8 +271,9 @@ this Mac's timezone.
 
 ## Releasing
 
-Merging to `main` is the release. `main` takes pull requests with a green
-`build` check; the maintainer is the only account that can push past that rule.
+Merging to `main` is the release. `main` takes pull requests only, with a green
+`build` check, and there are no bypass actors — the maintainer goes through the
+same gate as a contributor.
 `.github/workflows/release.yml` takes the next patch from the **latest published
 release**, not from the newest tag, so a run that dies before publishing is
 retried at the same number instead of burning one. It tags the merged commit,
