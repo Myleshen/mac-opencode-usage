@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     # A hand-made version bump on main should not be released twice.
     if: "github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'release: v')"
     steps:
