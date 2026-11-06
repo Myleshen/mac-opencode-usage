@@ -40,7 +40,8 @@ never for the self-test.
 ## Rules of the road
 
 - `main` takes pull requests only: a PR and a green `build` check are required,
-  and force-pushes and deletions are blocked.
+  and force-pushes and deletions are blocked. The maintainer account is the
+  single bypass actor, for emergencies.
 - No new dependencies and no second build step. One `swiftc` call, standard
   library and SwiftUI only.
 - No data loss and no hidden network traffic: the only requests are the ones
@@ -73,8 +74,9 @@ amounts and model names, not the key, but read before pasting.
 
 Everything after a merge to `main` is automatic:
 
-1. `.github/workflows/release.yml` takes the next patch from the tags and tags
-   the merged commit. Nothing is committed back to `main`.
+1. `.github/workflows/release.yml` takes the next patch from the latest
+   published release and tags the merged commit. Nothing is committed back to
+   `main`. A run that fails before publishing is retried at the same version.
 2. It builds a universal app with that version, runs `--selftest`, zips it and
    publishes `OpenCodeUsage.zip` with the sha256 in the notes.
 3. It bumps `version` and `sha256` in `Casks/opencode-usage.rb` in

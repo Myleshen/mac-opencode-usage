@@ -271,12 +271,14 @@ this Mac's timezone.
 
 ## Releasing
 
-Merging to `main` is the release. `main` only takes pull requests, with a green
-`build` check, so CI sees the branch before anything ships.
-`.github/workflows/release.yml` takes the next patch from the tags, tags the
-merged commit, builds a universal app with that version, runs the self-test,
-publishes `OpenCodeUsage.zip` with its sha256 in the notes, and then bumps
-`version` + `sha256` in the cask in
+Merging to `main` is the release. `main` takes pull requests with a green
+`build` check; the maintainer is the only account that can push past that rule.
+`.github/workflows/release.yml` takes the next patch from the **latest published
+release**, not from the newest tag, so a run that dies before publishing is
+retried at the same number instead of burning one. It tags the merged commit,
+builds a universal app with that version, runs the self-test, publishes
+`OpenCodeUsage.zip` with its sha256 in the notes, and then bumps `version` +
+`sha256` in the cask in
 [Myleshen/homebrew-tap](https://github.com/Myleshen/homebrew-tap) — the pinned
 version is what lets users move forward with `brew upgrade --cask
 opencode-usage`. Nothing is committed back to `main`, and a local `./build.sh`

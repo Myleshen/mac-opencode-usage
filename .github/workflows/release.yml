@@ -31,33 +31,52 @@ jobs:
       - name: Pick the version
         id: pick
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT}" ]; then
             version="${INPUT#v}"
           else
-            latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
-            [ -n "$latest" ] || { echo "no v* tag to bump from"; exit 1; }
-            IFS=. read -r major minor patch <<< "${latest#v}"
-            version="$major.$minor.$((patch + 1))"
+            # Published releases, not tags: a run that died after tagging must
+            # reuse its number instead of burning it.
+            latest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"
+            if [ -z "$latest" ]; then
+              version="0.0.1"
+            else
+              IFS=. read -r major minor patch <<< "${latest#v}"
+              version="$major.$minor.$((patch + 1))"
+            fi
           fi
+          force=false
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "v$version is already released, nothing to do"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "version=$version" >> "$GITHUB_OUTPUT"
+            if gh release view "v$version" >/dev/null 2>&1; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "v$version is already released, nothing to do"
+              exit 0
+            fi
+            # Tagged but never published: reuse the number and move the tag.
+            force=true
           fi
+          {
+            echo "skip=false"
+            echo "version=$version"
+            echo "force=$force"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Tag the release
         if: steps.pick.outputs.skip == 'false'
         env:
           VERSION: ${{ steps.pick.outputs.version }}
+          FORCE: ${{ steps.pick.outputs.force }}
         run: |
           set -euo pipefail
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+          git tag -f "v$VERSION"
+          if [ "$FORCE" = "true" ]; then
+            git push --force origin "v$VERSION"
+          else
+            git push origin "v$VERSION"
+          fi
 
       - name: Build, self-test, zip
         if: steps.pick.outputs.skip == 'false'
