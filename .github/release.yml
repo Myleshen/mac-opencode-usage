@@ -1,0 +1,13 @@
+# Notes for `gh release create --generate-notes`: PRs are grouped by label,
+# and GitHub adds the "New Contributors" section on its own. Direct commits
+# with no PR never show up here.
+changelog:
+  categories:
+    - title: New in the app
+      labels: [enhancement]
+    - title: Fixes
+      labels: [bug]
+    - title: Build, CI and docs
+      labels: [ci, documentation]
+    - title: Other changes
+      labels: ["*"]

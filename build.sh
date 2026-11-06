@@ -3,7 +3,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="build/OpenCodeUsage.app"
-VERSION="${VERSION:-1.0.22}"
+# Local builds take the version from the last tag, so a release never has to
+# commit anything back to main; the release workflow passes its own VERSION.
+VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)}"
+VERSION="${VERSION:-0.0.0}"
 BUILD="${BUILD:-1}"
 # ARCHS="arm64 x86_64" produces a universal binary; default is this machine.
 ARCHS="${ARCHS:-$(uname -m)}"
