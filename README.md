@@ -280,8 +280,9 @@ version is what lets users move forward with `brew upgrade --cask
 opencode-usage`. Tagging by hand is not needed; `workflow_dispatch` takes an
 explicit version if a patch bump is the wrong one.
 
-The cask step needs a `TAP_TOKEN` repository secret: a fine-grained token with
-**Contents: read and write** on the tap. Without it the release is still
+The cask step needs a `TAP_DEPLOY_KEY` repository secret: the private half of an
+SSH deploy key with write access to the tap, whose public half is registered
+under the tap's Settings → Deploy keys. Without it the release is still
 published and the workflow warns that the cask was left behind.
 
 Homebrew reads its own clone of the tap

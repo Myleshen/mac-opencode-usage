@@ -78,10 +78,10 @@ Everything after a merge to `main` is automatic:
 3. It bumps `version` and `sha256` in `Casks/opencode-usage.rb` in
    [Myleshen/homebrew-tap](https://github.com/Myleshen/homebrew-tap).
 
-Step 3 needs a `TAP_TOKEN` secret: a fine-grained token with
-**Contents: read and write** on `Myleshen/homebrew-tap`. Without it the release
-still publishes and the workflow logs a warning; the cask then has to be bumped
-by hand.
+Step 3 needs a `TAP_DEPLOY_KEY` secret: the private half of an SSH deploy key
+with write access to the tap (the public half is on the tap under Settings →
+Deploy keys). Without it the release still publishes and the workflow logs a
+warning; the cask then has to be bumped by hand.
 
 Homebrew reads its own clone of the tap, so pull that clone before checking an
 upgrade locally:
