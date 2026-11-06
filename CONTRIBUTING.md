@@ -40,8 +40,8 @@ never for the self-test.
 ## Rules of the road
 
 - `main` takes pull requests only: a PR and a green `build` check are required,
-  and force-pushes and deletions are blocked. The maintainer account is the
-  single bypass actor, for emergencies.
+  and force-pushes and deletions are blocked. There are no bypass actors, so
+  the maintainer opens a PR like everyone else.
 - No new dependencies and no second build step. One `swiftc` call, standard
   library and SwiftUI only.
 - No data loss and no hidden network traffic: the only requests are the ones
