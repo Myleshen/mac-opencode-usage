@@ -1,8 +1,9 @@
 name: release
 
-# One release per merge to main: bump the patch, tag it, build a universal app,
-# publish OpenCodeUsage.zip and move the Homebrew cask forward. The bump commit
-# is pushed with GITHUB_TOKEN, which does not start another run.
+# One release per merge to main: take the next patch from the tags, tag the
+# merged commit, build a universal app, publish OpenCodeUsage.zip and move the
+# Homebrew cask forward. Nothing is committed back to main, so branch
+# protection can require PRs without a bot needing to bypass it.
 on:
   push:
     branches: [main]
@@ -22,8 +23,6 @@ concurrency:
 jobs:
   release:
     runs-on: macos-15
-    # A hand-made version bump on main should not be released twice.
-    if: "github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'release: v')"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,19 +50,12 @@ jobs:
             echo "version=$version" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Bump build.sh and tag
+      - name: Tag the release
         if: steps.pick.outputs.skip == 'false'
         env:
           VERSION: ${{ steps.pick.outputs.version }}
         run: |
           set -euo pipefail
-          sed -i '' -E "s/VERSION:-[0-9]+\.[0-9]+\.[0-9]+/VERSION:-$VERSION/" build.sh
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet build.sh; then
-            git commit -am "release: v$VERSION"
-            git push origin HEAD:main
-          fi
           git tag "v$VERSION"
           git push origin "v$VERSION"
 

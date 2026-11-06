@@ -7,7 +7,7 @@
 - [ ] `ARCHS="arm64 x86_64" ./build.sh` succeeds without new warnings
 - [ ] `./build/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --selftest` passes
 - [ ] README updated if anything user-visible changed
-- [ ] No version bump (the release workflow does that on merge)
+- [ ] No version bump (the release workflow tags the merge)
 - [ ] New logic has an assert in `Sources/SelfTest.swift`
 
 ## Notes for the reviewer

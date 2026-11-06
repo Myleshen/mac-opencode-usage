@@ -271,14 +271,17 @@ this Mac's timezone.
 
 ## Releasing
 
-Merging to `main` is the release. `.github/workflows/release.yml` bumps the
-patch version in `build.sh`, commits `release: vX.Y.Z`, tags it, builds a
-universal app, runs the self-test, publishes `OpenCodeUsage.zip` with its
-sha256 in the notes, and then bumps `version` + `sha256` in the cask in
+Merging to `main` is the release. `main` only takes pull requests, with a green
+`build` check, so CI sees the branch before anything ships.
+`.github/workflows/release.yml` takes the next patch from the tags, tags the
+merged commit, builds a universal app with that version, runs the self-test,
+publishes `OpenCodeUsage.zip` with its sha256 in the notes, and then bumps
+`version` + `sha256` in the cask in
 [Myleshen/homebrew-tap](https://github.com/Myleshen/homebrew-tap) — the pinned
 version is what lets users move forward with `brew upgrade --cask
-opencode-usage`. Tagging by hand is not needed; `workflow_dispatch` takes an
-explicit version if a patch bump is the wrong one.
+opencode-usage`. Nothing is committed back to `main`, and a local `./build.sh`
+takes its version from the last tag. `workflow_dispatch` takes an explicit
+version if a patch bump is the wrong one.
 
 The cask step needs a `TAP_DEPLOY_KEY` repository secret: the private half of an
 SSH deploy key with write access to the tap, whose public half is registered
