@@ -19,8 +19,13 @@ belongs in `--dump`, not here.
 Run the app while you work:
 
 ```shell
-open build/OpenCodeUsage.app
+./build.sh --debug
+open build/OpenCodeUsage-dev.app
 ```
+
+The dev build has its own bundle id, settings and login item, so it runs beside
+the `/Applications` install without replacing it. Quit it and `rm -rf
+build/OpenCodeUsage-dev.app` when you are done.
 
 `--dump` (live usage), `--limits` (raw meter) and `--update` (release check)
 need a signed-in opencode and a network; that is fine for manual checks but
