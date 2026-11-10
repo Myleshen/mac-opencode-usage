@@ -115,7 +115,7 @@ Open the panel, click the gear.
 | Refresh | 10 min | Timer keeps running while the panel is closed. |
 | Warn / critical | 80% / 95% | Panel color and warning triangle. |
 | Menu bar | H + W + M | Which figures to show; add C for the credit-usage percentage. |
-| Launch at login | off | Writes and registers `~/Library/LaunchAgents/dev.myleshen.opencode-usage.plist`. |
+| Launch at login | off | Writes and registers `~/Library/LaunchAgents/dev.myleshen.opencode-usage.plist`. Remembered in preferences, so a brew upgrade that deletes the agent gets it back on the next launch. |
 | Quit | — | Button at the bottom of settings; a MenuBarExtra has no Quit item of its own. |
 
 The footer shows the running version, and `· vX.Y.Z available` once GitHub
