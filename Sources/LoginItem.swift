@@ -6,6 +6,9 @@ enum LoginItem {
     // Follows the bundle id, so a debug build registers its own agent and
     // cannot repoint the install's login item.
     static let label = Bundle.main.bundleIdentifier ?? "dev.myleshen.opencode-usage"
+    // A brew upgrade deletes the agent through the cask's uninstall stanza, so
+    // the intent has to outlive the file or login start silently goes away.
+    private static let wantedKey = "launchAtLogin"
 
     static var url: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -19,11 +22,18 @@ enum LoginItem {
     // A rebuild or a move leaves the plist pointing at a path that no longer
     // exists, so fix it on launch instead of silently losing the login item.
     static func repair() {
-        guard enabled,
-              let path = Bundle.main.executableURL?.path,
+        let defaults = UserDefaults.standard
+        guard enabled else {
+            if defaults.bool(forKey: wantedKey) { try? set(true) }
+            return
+        }
+        // Backfill for installs that turned it on before this flag existed.
+        if defaults.object(forKey: wantedKey) == nil { defaults.set(true, forKey: wantedKey) }
+        guard let path = Bundle.main.executableURL?.path,
               let plist = NSDictionary(contentsOf: url) as? [String: Any],
               let arguments = plist["ProgramArguments"] as? [String],
-              arguments.first != path else { return }
+              arguments.first != path
+        else { return }
         try? set(true)
     }
 
@@ -56,6 +66,7 @@ enum LoginItem {
             launchctl(["bootout", "gui/\(getuid())/\(label)"])
             try? FileManager.default.removeItem(at: url)
         }
+        UserDefaults.standard.set(on, forKey: wantedKey)
     }
 
     private static func launchctl(_ arguments: [String]) {
