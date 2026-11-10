@@ -17,12 +17,6 @@ private func usageColor(_ pct: Double?, warning: Double, critical: Double) -> Co
     return "v\(current) · \(latest) available, brew reinstall --cask opencode-usage"
 }
 
-private let clock: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "HH:mm"
-    return formatter
-}()
-
 struct PanelView: View {
     @ObservedObject var store: Store
     @State private var showSettings = false
@@ -82,9 +76,10 @@ struct PanelView: View {
                 // Only the 5-hour window is small enough for the usage API to
                 // serve in dollars; for the wider ones the console meter's reset
                 // time is the honest second line.
-                summaryCard(data.meters == nil ? "Last 5h" : "5-hour", Usage.top(data, .five))
-                summaryCard("Weekly", Usage.top(data, .week), note: resetNote(data.meters?.week))
-                summaryCard("Monthly", Usage.top(data, .month), note: resetNote(data.meters?.month))
+                summaryCard(data.meters == nil ? "Last 5h" : "5-hour", Usage.top(data, .five),
+                            note: meterNote(data, .five))
+                summaryCard("Weekly", Usage.top(data, .week), note: meterNote(data, .week))
+                summaryCard("Monthly", Usage.top(data, .month), note: meterNote(data, .month))
             }
 
             creditsCards(data.credits)
@@ -113,8 +108,8 @@ struct PanelView: View {
             // Cards are for models used in the windows being shown; the
             // lifetime query would otherwise add a card for every model this
             // account has ever touched.
-            // A card per model that actually spent something this month: a
-            // fraction of a cent is noise, not usage.
+            // A card per model that actually spent something in the window the
+            // list claims: a fraction of a cent is noise, not usage.
             let cards = data.models.filter { $0.month >= Usage.meaningful }
             if cards.isEmpty {
                 Text("No OpenCode Go usage in this period.")
@@ -154,9 +149,18 @@ struct PanelView: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.06)))
     }
 
-    private func resetNote(_ meter: Meters.Meter?) -> String? {
-        guard let at = meter?.resetsAt else { return nil }
-        return "resets " + clock.string(from: at) + " " + Usage.offset
+    // The meter's percentage and the plan's dollars come from the same source,
+    // so they are shown together; the reset instant is the meter's own.
+    private func meterNote(_ data: UsageData, _ period: Period) -> String? {
+        var lines: [String] = []
+        if let spend = data.plan?.meter(period) {
+            lines.append("\(Usage.money(spend.used)) of \(Usage.money(spend.limit))")
+        }
+        if let at = data.meters?.meter(period)?.resetsAt {
+            // The card is narrow, so the zone is only named in the details rows.
+            lines.append("resets " + Usage.stamp(at, zone: false))
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     // The Go plan's meters are percentages of an allowance; managed inference
@@ -233,6 +237,7 @@ struct PanelView: View {
             HStack(alignment: .top, spacing: 8) {
                 miniStat(store.data?.meters == nil ? "Last 5h" : "5-hour", model.value(.five), Usage.cap(model, .five))
                 miniStat("Today", model.today, nil)
+                miniStat("This month", model.month, Usage.cap(model, .month))
                 miniStat("All time", model.total, nil)
             }
 
@@ -281,8 +286,9 @@ struct PanelView: View {
             Text("Details").font(.system(size: 12, weight: .semibold))
             // Local midnight, not the console's window, so name the boundary.
             detailRow("Today (00:00 \(Usage.offset))", Usage.money(data.today))
-            // Lifetime, not "this month": the API clamps `since` to about three
-            // days, so any month figure would be a three-day total in disguise.
+            detailRow("This month", Usage.money(data.month) + " · " + Usage.compact(data.monthRequests) + " req")
+            // Lifetime, not a span: the API clamps `since` to yesterday, so the
+            // row is labelled for the one range it can serve.
             detailRow("All time", Usage.money(data.lifetimeTotal) + " · " + Usage.compact(data.lifetimeRequests) + " req")
             if let credits = data.credits {
                 detailRow("Available credits", Usage.money(credits.available))
@@ -291,25 +297,69 @@ struct PanelView: View {
                 }
                 if let mode = credits.mode { detailRow("Credits mode", mode) }
             }
+            if let plan = data.plan {
+                // The plan's month is the subscription period, not the calendar
+                // month, so it does not match the "This month" row above.
+                if let month = plan.meter(.month) {
+                    detailRow("Plan month", "\(Usage.money(month.used)) of \(Usage.money(month.limit))")
+                }
+                if let renews = plan.renewsAt { detailRow("Plan renews", Usage.stamp(renews)) }
+                // "renewing" is the normal state, so only a cancellation is
+                // worth a row of its own.
+                let billing = [plan.payment, plan.resumability == "renewing" ? nil : plan.resumability]
+                    .compactMap { $0 }
+                if !billing.isEmpty { detailRow("Billing", billing.joined(separator: " · ")) }
+            }
             if let meter = data.meters?.five {
                 detailRow("5h resets", reset(meter))
                 // In metered mode every other time above is a future reset, so
                 // without this row stale data would look fresh.
-                detailRow("Updated", clock.string(from: data.updatedAt) + " " + Usage.offset)
+                detailRow("Updated", Usage.stamp(data.updatedAt))
                 detailRow("Source", "console meter")
             } else {
                 // No console workspace linked: these are the edges of a rolling
                 // sum, not a reset time.
-                detailRow("5h starts", clock.string(from: data.fiveSinceAt) + " " + Usage.offset)
-                detailRow("5h ends", clock.string(from: data.updatedAt) + " " + Usage.offset)
+                detailRow("5h starts", Usage.stamp(data.fiveSinceAt))
+                detailRow("5h ends", Usage.stamp(data.updatedAt))
                 detailRow("Source", "console usage API")
+            }
+
+            if !data.days.isEmpty {
+                dailyStrip(data.days)
             }
         }
     }
 
+    // cost-by-day is already zero-filled for days the API omits, so the strip
+    // is the last N calendar days rather than the last N days with spend.
+    private func dailyStrip(_ days: [DaySpend]) -> some View {
+        let peak = days.map(\.cost).max() ?? 0
+        let total = days.reduce(0) { $0 + $1.cost }
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Last \(days.count) days").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(Usage.money(total)) · peak \(Usage.money(peak))")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(days) { entry in
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color.primary.opacity(entry.cost > 0 ? 0.55 : 0.12))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: max(2, 26 * (peak > 0 ? entry.cost / peak : 0)))
+                        .help("\(Usage.dayName(entry.day)) · \(Usage.money(entry.cost))")
+                }
+            }
+            .frame(height: 26, alignment: .bottom)
+        }
+        .padding(.top, 4)
+    }
+
     private func reset(_ meter: Meters.Meter) -> String {
         guard let at = meter.resetsAt else { return "unknown" }
-        return clock.string(from: at) + " " + Usage.offset
+        return Usage.stamp(at)
     }
 
     // Every model in the Go table, including ones with no spend this month —
@@ -341,7 +391,7 @@ struct PanelView: View {
                             Spacer()
                             // Same window as the cards: the all-time total made a
                             // model look expensive next to its own month card.
-                            if let model = Usage.spend(data, name: name), model.month > 0 {
+                            if let model = Usage.spend(data, name: name), model.month >= Usage.meaningful {
                                 Text(Usage.money(model.month))
                                     .font(.system(size: 10, weight: .medium))
                                 Text("/ \(Usage.money(Limits.value(model: name) ?? 0))")

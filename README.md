@@ -210,29 +210,39 @@ omits the used line in that case.
 2. Asks the local opencode server for the console meter
    (`opencode api GET /api/experimental/usage/limits`). If it has data, those
    percentages are what the bar shows.
-3. `GET /console/api/usage/models?since=…` for the 5h and today windows, plus
-   one call with no `since` for lifetime totals. Filters `provider ==
-   "opencode-go"` and converts `totalCostMicroCents / 1e8` to USD. These sums
-   drive the per-model cards, and the bar only when step 2 has no meter.
+3. `GET /console/api/usage/models?since=…` for the 5h and today windows,
+   `from=…&to=…` calendar days for the week and month lists, plus one call with
+   no window for lifetime totals. Filters `provider == "opencode-go"` and
+   converts `totalCostMicroCents / 1e8` to USD. These sums drive the per-model
+   cards, and
+   the bar only when step 2 has no meter.
 4. `GET /console/api/billing/status` and `/billing/payment-attempts` for the
    **Available credits** and **Credits used** cards. Best-effort, so a
    workspace without billing simply hides those cards.
+5. `GET /console/api/go/status` for the dollars behind the meter percentages
+   (`usedMicroCents` / `limitMicroCents`) and the subscription period
+   (`access.endsAt`). The plan's month is that period — measured on this
+   account: Oct 31 to Nov 30, $60 allowance, resets at renewal — so it is
+   **not** the same window, or the same measure, as the calendar month's spend
+   from the usage API. Both are labelled; neither is derived from the other.
+6. `GET /console/api/usage/cost-by-day?from=…&to=…` for the 14-day strip.
+   Quiet days are omitted, so the app zero-fills them. Best-effort: a failure
+   hides the strip instead of failing the refresh.
 
-### Why there are no weekly or monthly dollar figures
+### What range can be queried
 
-`since` is silently clamped: ask for 2 days back and you get the same numbers as
-for 7 days back, because the endpoint only retains roughly three days of detail.
-Measured on this account at one instant — `-1d` 2,651 requests, `-2d` 4,297,
-`-3d` 4,298, `-4d` … `-7d` 4,299 — a flat plateau, and the same for cost. So a
-week or month of spend cannot be queried at all, and anything labelled that way
-would just be a three-day total with the wrong name.
+`since` is silently clamped to the start of yesterday: `-1d` returns yesterday
+onward, and `-2d`, `-4d`, `-30d` all return exactly the same rows. So a month of
+`since` is a two-day total with the wrong name.
 
-What the API does serve is honest: the meter's percentages (step 2), the 5-hour
-and today windows (inside the retention), and lifetime totals (no `since`). The
-panel shows exactly those, and the Weekly and Monthly cards show the meter's
-reset time instead of a dollar figure. The console's own page shows a week of
-spend from a store the public API does not expose, which is why its dollar
-figure cannot be reproduced here.
+The same endpoint also takes `from` and `to` — plain calendar days,
+`yyyy-MM-dd`, **both ends inclusive**, clamped to now — which are served from
+the full history and need no `range`. Measured on this account: Nov 1–10
+$22.14, Oct 1–31 $20.56, and `from` = `to` = Nov 7 $0.0136, matching that day's
+`cost-by-day` bucket. So the Month window asks for the calendar month to date
+and the Week window for Monday to date, and both are labelled with their real
+names. `range` (`24h`, `7d`, `30d`, `6m`, `all`) still exists as a rolling span,
+but it cannot express a month or a week that starts on a fixed day.
 
 Window boundaries use the local calendar (Monday start), converted to UTC ISO
 for the `since` parameter — `since` must be a `Z` timestamp: the API rejects

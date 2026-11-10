@@ -119,10 +119,18 @@ enum SelfTest {
         check(Usage.percent(0.0723) == "7%", "percent rounding")
         check(Usage.money(144_312_426.0 / 100_000_000.0) == "$1.44", "money 2dp")
         check(Usage.money(1234) == "$1234", "money no dp")
+        check(Usage.money(60) == "$60", "whole tens drop the decimal")
+        check(Usage.money(14.24) == "$14.2", "tens keep one decimal")
         check(Usage.compact(116_727_552) == "116.7M", "compact millions")
         check(Usage.compact(999) == "999", "compact small")
         check(Usage.offset.count == 6 && Usage.offset.hasPrefix("+") == (TimeZone.current.secondsFromGMT() >= 0), "offset format")
         check(Usage.offset.dropFirst().contains(":"), "offset has minutes")
+        // A reset days away must name its day; one later today must not.
+        let soon = Date()
+        let later = soon.addingTimeInterval(6 * 24 * 3600)
+        check(Usage.stamp(soon).count == 12 && Usage.stamp(later).count > 12, "only a future stamp names the day")
+        check(Usage.stamp(later).hasSuffix(Usage.offset), "stamp names the zone")
+        check(!Usage.stamp(later, zone: false).contains(Usage.offset), "zone can be left out")
 
         // The console meter is authoritative when opencode has a linked
         // workspace: parse percents and the reset instant, ignore everything else.
@@ -138,6 +146,15 @@ enum SelfTest {
         check(meters?.week.resetsAt == nil, "missing resetsAt is nil")
         check(meters?.meter(.today) == nil, "today has no meter")
 
+        // `since` older than yesterday is ignored by the API, so the month list
+        // must ask for calendar days instead.
+        let monthQuery = Usage.modelQuery(from: Date(), to: Date(), page: 1)
+        check(monthQuery.contains { $0.name == "from" && $0.value?.count == 10 }, "month asks for calendar days")
+        check(monthQuery.contains { $0.name == "to" && $0.value?.count == 10 }, "day window has both ends")
+        check(!monthQuery.contains { $0.name == "since" }, "day window drops since")
+        check(Usage.modelQuery(since: Date(), page: 1).contains { $0.name == "since" }, "narrow window keeps since")
+        check(Usage.modelQuery(page: 1).count == 2, "lifetime query has no window")
+
         var metered = Usage.aggregate(
             windows: [.five: five, .week: week, .month: month, .today: []],
             since: since
@@ -147,6 +164,44 @@ enum SelfTest {
         check(abs((Usage.top(data, .five)?.pct ?? 0) - 0.1) < 0.0001, "no meter falls back to spend")
         check(Usage.meters(from: Data("{\"data\":null}".utf8)) == nil, "null data is no meter")
         check(Usage.meters(from: Data("{}".utf8)) == nil, "missing go is no meter")
+
+        // /go/status carries the dollars behind the meters and the plan's
+        // period end; both are µ¢ strings and fractional-second ISO.
+        let status: [String: Any] = [
+            "paymentMethodKind": "link",
+            "resumability": "renewing",
+            "access": [
+                "endsAt": "2026-11-30T13:56:20.000Z",
+                "meters": [
+                    "fiveHour": ["limitMicroCents": "1200000000", "usedMicroCents": "4018121"],
+                    "month": ["limitMicroCents": "6000000000", "usedMicroCents": "1423656687"],
+                ],
+            ],
+        ]
+        let plan = Usage.plan(from: status)
+        check(plan?.month?.used == 14.23656687, "plan month dollars")
+        check(plan?.month?.limit == 60, "plan month limit")
+        check(abs((plan?.month?.fraction ?? 0) - 0.2373) < 0.001, "plan month fraction")
+        check(plan?.week == nil, "missing meter is nil")
+        check(plan?.renewsAt != nil, "fractional ISO period end parses")
+        check(plan?.payment == "link" && plan?.resumability == "renewing", "plan billing fields")
+        check(Usage.plan(from: ["subscriberUserId": "acc"]) == nil, "status without access is no plan")
+        check(Usage.isoDate("2026-11-30T13:56:20Z") != nil, "plain ISO date parses")
+        check(Usage.isoDate("nope") == nil, "junk date is nil")
+
+        // cost-by-day omits quiet days, so the strip is rebuilt over the range.
+        let midnight = Usage.calendar.startOfDay(for: Date())
+        let twoAgo = Usage.calendar.date(byAdding: .day, value: -2, to: midnight)!
+        let spends = Usage.series(
+            [
+                ["date": Usage.day.string(from: midnight), "totalCostMicroCents": "500000000"],
+                ["date": Usage.day.string(from: twoAgo), "totalCostMicroCents": "100000000"],
+            ],
+            days: 3,
+            now: midnight
+        )
+        check(spends.count == 3, "one bucket per day")
+        check(spends.map { $0.cost } == [1, 0, 5], "quiet day is zero and order is oldest first")
 
         let weekStart = Usage.weekStart(now)
         check(Usage.calendar.component(.weekday, from: weekStart) == 2, "week starts Monday")
