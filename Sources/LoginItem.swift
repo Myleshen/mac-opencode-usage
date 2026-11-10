@@ -3,7 +3,9 @@ import Foundation
 // LaunchAgent instead of SMAppService: the app is locally built and ad-hoc
 // signed, where SMAppService silently fails outside /Applications.
 enum LoginItem {
-    static let label = "dev.myleshen.opencode-usage"
+    // Follows the bundle id, so a debug build registers its own agent and
+    // cannot repoint the install's login item.
+    static let label = Bundle.main.bundleIdentifier ?? "dev.myleshen.opencode-usage"
 
     static var url: URL {
         FileManager.default.homeDirectoryForCurrentUser

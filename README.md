@@ -82,8 +82,15 @@ downloaded again at runtime; the only network traffic is the usage API.
 ```shell
 ./build.sh                      # this machine's arch
 ARCHS="arm64 x86_64" ./build.sh # universal
+./build.sh --debug              # dev build that runs beside the install
 open build/OpenCodeUsage.app
 ```
+
+`--debug` builds `build/OpenCodeUsage-dev.app` with bundle id
+`dev.myleshen.opencode-usage.debug` and version `1.0.26-dev`. It keeps its own
+settings, instance lock and login item, so it runs next to the `/Applications`
+install without changing any of it. Remove it when you are done: quit the dev
+app and `rm -rf build/OpenCodeUsage-dev.app`.
 
 No Xcode project, no packages: `build.sh` runs one `swiftc` call and assembles
 the bundle. The icon lives in `Resources/AppIcon.icns`; `./icon.sh` redraws it

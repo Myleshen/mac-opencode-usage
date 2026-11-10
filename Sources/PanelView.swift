@@ -37,10 +37,13 @@ struct PanelView: View {
         .onAppear { store.refreshIfStale() }
     }
 
+    // A debug build runs beside the install, so the panel has to say which is which.
+    private static let isDebug = Bundle.main.bundleIdentifier?.hasSuffix(".debug") == true
+
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("OpenCode usage").font(.system(size: 16, weight: .bold))
+                Text("OpenCode usage\(Self.isDebug ? " (dev)" : "")").font(.system(size: 16, weight: .bold))
                 Text(store.data?.meters?.workspace.map { "\($0) · Go plan" } ?? "Go plan")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
