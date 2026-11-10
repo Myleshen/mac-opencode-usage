@@ -59,6 +59,11 @@ struct UsageData {
     // Percentages straight from the console's own meters, when opencode has a
     // linked console workspace. nil means the console API numbers are used.
     var meters: Meters?
+    // Dollars and period from the Go plan's own status, when the key can read
+    // it. nil is the normal case for a workspace without a subscription.
+    var plan: Plan?
+    // Daily spend, oldest first, zero-filled for days the API omits.
+    var days: [DaySpend] = []
     // Prepaid balance for managed inference (Zen). nil when the workspace has
     // no billing account, or when the billing route is unreachable.
     var credits: Credits?
@@ -96,6 +101,43 @@ struct Credits {
         guard let used, let basis, basis > 0 else { return nil }
         return used / basis
     }
+}
+
+// /console/api/go/status. The dollars behind the percentages, and the
+// subscription period they belong to. The month meter resets with the plan,
+// not at the start of the calendar month.
+struct Plan {
+    struct Meter {
+        let used: Double
+        let limit: Double
+
+        var fraction: Double { limit > 0 ? used / limit : 0 }
+    }
+
+    var five: Meter?
+    var week: Meter?
+    var month: Meter?
+    var renewsAt: Date?
+    // "link", "card", …
+    var payment: String?
+    // "renewing" or "cancelled".
+    var resumability: String?
+
+    func meter(_ period: Period) -> Meter? {
+        switch period {
+        case .five: return five
+        case .week: return week
+        case .month: return month
+        case .today: return nil
+        }
+    }
+}
+
+// One day of /console/api/usage/cost-by-day.
+struct DaySpend: Identifiable {
+    let day: Date
+    let cost: Double
+    var id: Date { day }
 }
 
 // UsageLimits.Go from opencode's server: the numbers the console itself shows.
@@ -215,6 +257,38 @@ enum Usage {
         return best
     }
 
+    private static let clock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let dayClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE d MMM"
+        return formatter
+    }()
+
+    // Query dates are plain calendar days, so they carry no zone suffix.
+    static let day: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    // A bare HH:mm reads as today, but the weekly and monthly resets are days
+    // away, so name the day whenever the instant is not today.
+    static func stamp(_ at: Date, zone: Bool = true) -> String {
+        let time = clock.string(from: at) + (zone ? " " + offset : "")
+        return calendar.isDateInToday(at) ? time : dayClock.string(from: at) + " " + time
+    }
+
+    // Labels a day the way the cards read when the instant is not today.
+    static func dayName(_ at: Date) -> String { dayClock.string(from: at) }
+
     // Current zone as "+05:30", so a time can be read without guessing the zone.
     static var offset: String {
         let seconds = TimeZone.current.secondsFromGMT()
@@ -224,7 +298,10 @@ enum Usage {
 
     static func money(_ value: Double) -> String {
         if value >= 100 { return String(format: "$%.0f", value) }
-        if value >= 10 { return String(format: "$%.1f", value) }
+        if value >= 10 {
+            // A plan's $60 allowance should read "$60", not "$60.0".
+            return value.rounded() == value ? String(format: "$%.0f", value) : String(format: "$%.1f", value)
+        }
         if value >= 0.01 { return String(format: "$%.2f", value) }
         if value > 0 { return String(format: "$%.3f", value) }
         return "$0.00"
@@ -331,23 +408,41 @@ enum Usage {
         return nil
     }
 
-    // `since` nil asks for lifetime: the only range wider than the API's
-    // roughly three-day lookback cap.
-    static func models(since: Date?, key: String) async throws -> [[String: Any]] {
+    // `since` is clamped to the start of yesterday, so anything older silently
+    // comes back as yesterday's rows. `from`/`to` are calendar days (both ends
+    // inclusive, `yyyy-MM-dd`) and reach the whole history; `since` nil means
+    // lifetime. `range` (24h, 7d, 30d, 6m, all) is a rolling span, so it cannot
+    // express a month or week that starts on a fixed day.
+    static func modelQuery(
+        since: Date? = nil,
+        from: Date? = nil,
+        to: Date? = nil,
+        page: Int
+    ) -> [URLQueryItem] {
+        var items = [
+            URLQueryItem(name: "pageSize", value: "100"),
+            URLQueryItem(name: "page", value: String(page)),
+        ]
+        if let from, let to {
+            items.insert(URLQueryItem(name: "from", value: day.string(from: from)), at: 0)
+            items.insert(URLQueryItem(name: "to", value: day.string(from: to)), at: 1)
+        } else if let since {
+            items.insert(URLQueryItem(name: "since", value: iso.string(from: since)), at: 0)
+        }
+        return items
+    }
+
+    static func models(
+        since: Date? = nil,
+        from: Date? = nil,
+        to: Date? = nil,
+        key: String
+    ) async throws -> [[String: Any]] {
         var items: [[String: Any]] = []
         var page = 1
         while true {
             var components = URLComponents(string: api + "/usage/models")!
-            components.queryItems = [
-                URLQueryItem(name: "pageSize", value: "100"),
-                URLQueryItem(name: "page", value: String(page)),
-            ]
-            if let since {
-                components.queryItems?.insert(
-                    URLQueryItem(name: "since", value: iso.string(from: since)),
-                    at: 0
-                )
-            }
+            components.queryItems = modelQuery(since: since, from: from, to: to, page: page)
 
             let body = try await request(components.url!, key: key)
             items += body["items"] as? [[String: Any]] ?? []
@@ -409,6 +504,70 @@ enum Usage {
         guard let url = URL(string: api + "/billing/payment-attempts") else { return nil }
         guard let list = try? await rows(url, key: key) else { return nil }
         return creditPurchases(from: list)
+    }
+
+    // MARK: - Plan and daily spend
+
+    // The console sends fractional seconds, which an ISO8601DateFormatter only
+    // parses when told to expect them, so try both shapes.
+    static func isoDate(_ text: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: text) ?? iso.date(from: text)
+    }
+
+    static func plan(from body: [String: Any]) -> Plan? {
+        guard let access = body["access"] as? [String: Any] else { return nil }
+        let meters = access["meters"] as? [String: Any] ?? [:]
+
+        func meter(_ key: String) -> Plan.Meter? {
+            guard let item = meters[key] as? [String: Any],
+                  let used = number(item["usedMicroCents"]),
+                  let limit = number(item["limitMicroCents"])
+            else { return nil }
+            return Plan.Meter(used: used / 100_000_000, limit: limit / 100_000_000)
+        }
+
+        return Plan(
+            five: meter("fiveHour"),
+            week: meter("week"),
+            month: meter("month"),
+            renewsAt: (access["endsAt"] as? String).flatMap(isoDate),
+            payment: body["paymentMethodKind"] as? String,
+            resumability: body["resumability"] as? String
+        )
+    }
+
+    static func planStatus(key: String) async -> Plan? {
+        guard let url = URL(string: api + "/go/status") else { return nil }
+        guard let body = try? await request(url, key: key) else { return nil }
+        return plan(from: body)
+    }
+
+    // cost-by-day leaves out days with no spend (and includes some free-model
+    // days at $0), so the strip is rebuilt over the whole span.
+    static func series(_ rows: [[String: Any]], days: Int, now: Date) -> [DaySpend] {
+        var byDay: [String: DaySpend] = [:]
+        for row in rows {
+            guard let text = row["date"] as? String, let at = day.date(from: text) else { continue }
+            byDay[text] = DaySpend(day: at, cost: (number(row["totalCostMicroCents"]) ?? 0) / 100_000_000)
+        }
+        let today = calendar.startOfDay(for: now)
+        return (0..<days).reversed().compactMap { back in
+            guard let at = calendar.date(byAdding: .day, value: -back, to: today) else { return nil }
+            return byDay[day.string(from: at)] ?? DaySpend(day: at, cost: 0)
+        }
+    }
+
+    static func daily(key: String, days: Int = 14, now: Date = Date()) async -> [DaySpend] {
+        guard let from = calendar.date(byAdding: .day, value: -(days - 1), to: now) else { return [] }
+        var components = URLComponents(string: api + "/usage/cost-by-day")!
+        components.queryItems = [
+            URLQueryItem(name: "from", value: day.string(from: from)),
+            URLQueryItem(name: "to", value: day.string(from: now)),
+        ]
+        guard let list = try? await rows(components.url!, key: key) else { return [] }
+        return series(list, days: days, now: now)
     }
 
     // MARK: - Aggregation
@@ -489,13 +648,22 @@ enum Usage {
 
         async let lifetimeRows = models(since: nil, key: key)
         async let creditStatus = credits(key: key)
+        async let goStatus = planStatus(key: key)
+        async let recentDays = daily(key: key)
 
         var windows: [Period: [[String: Any]]] = [:]
         try await withThrowingTaskGroup(of: (Period, [[String: Any]]).self) { group in
             for period in Period.allCases {
                 let at = since[period]!
                 group.addTask {
-                    (period, try await models(since: at, key: key))
+                    // `since` would be clamped to yesterday, so the week and the
+                    // month ask for their calendar days instead, both ends
+                    // inclusive.
+                    let start = period == .week ? weekStart(now) : monthStart(now)
+                    let rows = period == .five || period == .today
+                        ? try await models(since: at, key: key)
+                        : try await models(from: start, to: now, key: key)
+                    return (period, rows)
                 }
             }
             for try await (period, items) in group {
@@ -523,6 +691,8 @@ enum Usage {
         data.models = byId.values.sorted { $0.total > $1.total }
         data.meters = metersFromCLI()
         data.credits = await creditStatus
+        data.plan = await goStatus
+        data.days = await recentDays
         return data
     }
 
@@ -593,6 +763,16 @@ enum Usage {
             }
         }
         lines.append("today \(money(data.today))")
+        lines.append("this month \(money(data.month)) · \(data.monthRequests) req")
+        if let plan = data.plan, let month = plan.month {
+            lines.append("plan month \(money(month.used)) of \(money(month.limit)) · "
+                + "renews \(plan.renewsAt.map { iso.string(from: $0) } ?? "—") · "
+                + "\(plan.payment ?? "?") · \(plan.resumability ?? "?")")
+        }
+        if !data.days.isEmpty {
+            let total = data.days.reduce(0) { $0 + $1.cost }
+            lines.append("last \(data.days.count) days \(money(total))")
+        }
         lines.append("all time \(money(data.lifetimeTotal)) · \(data.lifetimeRequests) req")
         lines.append("available credits \(data.credits.map { money($0.available) } ?? "—")")
         if let credits = data.credits, let used = credits.usedFraction, let spent = credits.used, let basis = credits.basis {
@@ -614,13 +794,13 @@ enum Usage {
         // dump the same join: a docs name that fails to find its API id shows
         // up here as a missing row instead of "no usage" in the UI.
         let listed = Limits.models().compactMap { name -> String? in
-            guard let model = spend(data, name: name), model.month > 0 else { return nil }
+            guard let model = spend(data, name: name), model.month >= meaningful else { return nil }
             let limit = Limits.value(model: name).map(money) ?? "-"
             return "  \(name) \(money(model.month)) of \(limit)"
         }
         if !listed.isEmpty {
             lines.append("cards \(data.models.filter { $0.month >= meaningful }.count) models (month >= \(money(meaningful)))")
-        lines.append("model list rows with spend:")
+            lines.append("model list rows with spend:")
             lines.append(contentsOf: listed)
         }
         return lines.joined(separator: "\n")
