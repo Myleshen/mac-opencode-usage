@@ -5,6 +5,10 @@
 A macOS menu bar app that shows what your OpenCode **Go** plan is using, right
 now. Port of the Noctalia plugin from my dotfiles.
 
+```sh
+brew install --cask Myleshen/tap/opencode-usage
+```
+
 The menu bar shows the gauge and three figures — `H 5% W 13% M 14%` — the
 same percentages the console dashboard shows, with the console's own reset
 times. Optionally add `C 17%` for the credit-usage percentage. Any
