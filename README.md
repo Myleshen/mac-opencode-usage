@@ -15,17 +15,17 @@ times. Optionally add `C 17%` for the credit-usage percentage. Any
 combination can be turned off in settings; click for per-model spend, requests
 and tokens.
 
-The figures come from the console's meter when opencode is signed in to a
-console workspace, and fall back to sums of the usage API otherwise (see
+The figures come from the Go plan's own meters when the key can read them, and
+fall back to sums of the usage API otherwise (see
 [Where the percentages come from](#where-the-percentages-come-from)).
 
 ## Requirements
 
 - macOS 14 or newer.
-- opencode installed and signed in to a Go plan. The app asks the CLI for the
-  credential (`opencode auth export`) and keeps nothing of its own: no key
-  store, no login screen. If the key is missing or expired, the panel says so
-  and points at `opencode auth login`.
+- opencode installed and signed in to a Go plan. The app reads the credential
+  from the CLI once per launch (`opencode auth export`) and keeps it in memory:
+  no key store, no login screen. If the key is missing or expired, the panel
+  says so and points at `opencode auth login`.
 
 ## First-time setup
 
@@ -45,21 +45,22 @@ brew tap Myleshen/tap
 brew install --cask opencode-usage
 open /Applications/OpenCodeUsage.app
 
-# 4. recommended: link the console workspace, which is where the real
-#    5-hour / weekly / monthly meters and reset times come from
+# 4. optional: link the console workspace in the CLI, only so `--limits` can
+#    show opencode's own usage route; the app's meters come from the Go key
 opencode auth login "OpenCode Console" --method device
 ```
 
 Step 4 prints a code and a URL — open the URL, enter the code, approve. Then
-check which source the app is using:
+check what the app sees:
 
 ```shell
-/Applications/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --limits
+/Applications/OpenCodeUsage.app/Contents/MacOS/OpenCodeUsage --dump
 ```
 
-Real meter data means the panel shows `5-hour` with a `5h resets …` row.
-`{"data":null}` means step 4 did not complete, and the app falls back to rolling
-sums — still correct, just not the console's own numbers.
+A `5h meter:` line means the panel shows `5-hour` with a `5h resets …` row, from
+the plan's own meters. A `5h starts …` line means the Go key could not read
+`/console/api/go/status`, and the app falls back to rolling sums — still
+correct, just not the console's own numbers.
 
 Finally, click the menu bar gauge → gear → **Launch at login**.
 
@@ -79,7 +80,8 @@ xattr -dr com.apple.quarantine /Applications/OpenCodeUsage.app
 ```
 
 or right-click the app → **Open** → **Open** to approve it. Nothing is
-downloaded again at runtime; the only network traffic is the usage API.
+downloaded again at runtime; the only network traffic is the usage API and the
+public model list.
 
 ## Build
 
@@ -116,7 +118,7 @@ Open the panel, click the gear.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Refresh | 10 min | Timer keeps running while the panel is closed. |
+| Refresh | 60 min | Timer keeps running while the panel is closed. |
 | Warn / critical | 80% / 95% | Panel color and warning triangle. |
 | Menu bar | H + W + M | Which figures to show; add C for the credit-usage percentage. |
 | Launch at login | off | Writes and registers `~/Library/LaunchAgents/dev.myleshen.opencode-usage.plist`. Remembered in preferences, so a brew upgrade that deletes the agent gets it back on the next launch. |
@@ -135,15 +137,18 @@ magnitude. The app therefore always shows every principal the key can see.
 
 ## Plans and the model list
 
-The limits are read from the pricing table on
-<https://opencode.ai/docs/go/> rather than compiled in, so a model added by
-OpenCode shows up on the next refresh instead of waiting for an app release.
-The page is fetched once a day (and on any refresh when the cache is older than
-that), parsed for the `go` slot, and cached in `UserDefaults`; a copy of the
-current 28-model table is bundled as the offline fallback, which `--dump` names
-(`limits 28 models (docs)` or `(bundled)`). Go Plus has substantially higher
+The limits are read from the public model list at
+<https://opencode.ai/inference/go/v1/models> rather than compiled in, so a model
+added by OpenCode shows up on the next refresh instead of waiting for an app
+release. No auth header is needed. `go.monthly_usage.go` is the model's monthly
+limit in dollars and `name` is its display name; the free models carry no `go`
+limit and are skipped. The list is fetched once a day, keyed through the same
+normalisation as the usage API ids and cached in `UserDefaults`; a failed fetch
+keeps the previous table and waits a day before retrying. A copy of the current
+28-model table is bundled as the offline fallback, which `--dump` names
+(`limits 33 models (api)` or `(bundled)`). Go Plus has substantially higher
 limits and Go Teams is Go + $5 per model, so on those plans the printed limits
-(and any percentage computed without a console session) will be low. There is
+(and any percentage computed without the plan's meters) will be low. There is
 no plan field in any API to detect it from, so the app does not guess.
 
 Below the model cards, **All N models with usage** expands into an
@@ -151,7 +156,7 @@ alphabetical list of only the models that have spend, with all-time spend and
 that model's limit. Untouched models are left out, but they still count towards
 the plan table fetched above.
 
-A model missing from the docs table has no limit to compare against, so it
+A model missing from the model list has no limit to compare against, so it
 shows "no limit data" and a banner, while spend and request counts keep
 updating.
 
@@ -159,27 +164,24 @@ updating.
 
 Two sources, in this order:
 
-1. **The console's own meter** — `opencode api GET /api/experimental/usage/limits`
-   returns `go.rolling` as `{percent, limited, resetsAt}`. That is the number the
-   console dashboard shows, with the real window boundary, so the app uses it
-   whenever it is there. Requires opencode to be signed into a console workspace
-   (`account` / `workspace` tables populated by the device sign-in above); the
-   details row then reads `5h resets 19:45 +05:30`. The same payload names the
-   workspace, which is what the subtitle shows (`Default · Go plan`) — there is
-   no org or workspace setting, because the key already implies it. All three
-   figures come from the same payload, whose boundaries are not the ones you
-   would guess: the weekly window resets Monday **00:00 UTC**, and the monthly
-   window is a rolling ~30 days, not the calendar month.
-2. **A rolling five-hour sum** of the console usage API, if that meter is absent.
-   Then the panel labels the card `Last 5h` and shows the window start and end
-   instead of a reset time, because a rolling sum has no future boundary.
+1. **The plan's own meters** — `GET /console/api/go/status`, authorised by the
+   same Go key, returns `access.meters.fiveHour`, `.week` and `.month`, each
+   with `usedMicroCents`, `limitMicroCents` and `resetsAt`. The percent is
+   used/limit and the reset instant is the console's own, so the details row
+   reads `5h resets 19:45 +05:30`. All three figures come from the same payload:
+   the weekly window resets Monday **00:00 UTC**, and the monthly one at the
+   subscription's period end (`access.endsAt`).
+2. **A rolling five-hour sum** of the console usage API, if those meters are
+   absent. Then the panel labels the card `Last 5h` and shows the window start
+   and end instead of a reset time, because a rolling sum has no future
+   boundary.
 
-When fallback 2 is in use the panel says so outright — a **No console session** banner
-sits above the cards, with the command to fix it. The two sources can disagree
-materially (9% vs the console's 14% on the same account), so it is never silent.
+When fallback 2 is in use the panel says so outright — a **No plan meters**
+banner sits above the cards. The two sources can disagree materially (9% vs the
+console's 14% on the same account), so it is never silent.
 
-`./OpenCodeUsage --limits` prints the raw meter response, which is how to tell
-which source is in use.
+`./OpenCodeUsage --dump` prints which of the two is in use (`5h meter:` or
+`5h starts …`).
 
 ## Available credits
 
@@ -214,29 +216,26 @@ omits the used line in that case.
 
 ## How it works
 
-1. Asks the CLI for the active Go credential (`opencode auth export`) rather
-   than reading opencode's sqlite file, so a schema change cannot break it. The
-   key never leaves the machine except as the `Authorization` header to
-   `opencode.ai`.
-2. Asks the local opencode server for the console meter
-   (`opencode api GET /api/experimental/usage/limits`). If it has data, those
-   percentages are what the bar shows.
+1. Asks the CLI for the active Go credential (`opencode auth export`) once per
+   launch rather than reading opencode's sqlite file, so a schema change cannot
+   break it. The key is kept in memory and never leaves the machine except as
+   the `Authorization` header to `opencode.ai`.
+2. `GET /console/api/go/status` for the plan's five-hour, weekly and monthly
+   meters: percent = `usedMicroCents / limitMicroCents`, each meter's own
+   `resetsAt`, and the subscription period (`access.endsAt`). Those percentages
+   are what the bar shows. The plan's month is that period — measured on this
+   account: Oct 31 to Nov 30, $60 allowance, resets at renewal — so it is
+   **not** the same window, or the same measure, as the calendar month's spend
+   from the usage API. Both are labelled; neither is derived from the other.
 3. `GET /console/api/usage/models?since=…` for the 5h and today windows,
    `from=…&to=…` calendar days for the week and month lists, plus one call with
    no window for lifetime totals. Filters `provider == "opencode-go"` and
    converts `totalCostMicroCents / 1e8` to USD. These sums drive the per-model
-   cards, and
-   the bar only when step 2 has no meter.
+   cards, and the bar only when step 2 has no meter.
 4. `GET /console/api/billing/status` and `/billing/payment-attempts` for the
    **Available credits** and **Credits used** cards. Best-effort, so a
    workspace without billing simply hides those cards.
-5. `GET /console/api/go/status` for the dollars behind the meter percentages
-   (`usedMicroCents` / `limitMicroCents`) and the subscription period
-   (`access.endsAt`). The plan's month is that period — measured on this
-   account: Oct 31 to Nov 30, $60 allowance, resets at renewal — so it is
-   **not** the same window, or the same measure, as the calendar month's spend
-   from the usage API. Both are labelled; neither is derived from the other.
-6. `GET /console/api/usage/cost-by-day?from=…&to=…` for the 14-day strip.
+5. `GET /console/api/usage/cost-by-day?from=…&to=…` for the 14-day strip.
    Quiet days are omitted, so the app zero-fills them. Best-effort: a failure
    hides the strip instead of failing the refresh.
 
@@ -283,11 +282,11 @@ this Mac's timezone.
 | --- | --- |
 | `No OpenCode Go credential found` | Nothing for the `opencode-go` integration: `opencode auth login`, pick OpenCode Go. |
 | `The OpenCode Go key was rejected (HTTP 401)` | Key expired or rotated: re-run `opencode auth login`. |
-| Panel says `Last 5h` instead of `5-hour` | No console session, so `--limits` returns `{"data":null}`: re-run the device sign-in. |
-| `no limit data` on every card | A model newer than the built-in table, or a Go Plus/Teams account. Spend still works. |
+| Panel says `Last 5h` instead of `5-hour` | The Go key could not read the plan's meters in `/console/api/go/status`: check that `--dump` prints a `plan month` line and that the key is a Go subscription key. |
+| `no limit data` on every card | A model newer than the model list, or a Go Plus/Teams account. Spend still works. |
 | Gatekeeper says the app is damaged | Quarantine flag: `xattr -dr com.apple.quarantine /Applications/OpenCodeUsage.app`. |
 | Menu bar shows two gauges | Stale copy holding no lock file — remove the other `OpenCodeUsage.app`, keep one. |
-| Banner says **No console session** | The device sign-in lapsed or was never done: `opencode auth login "OpenCode Console" --method device`, then refresh. |
+| Banner says **No plan meters** | The key could not read the plan's meters: `--dump` shows whether the plan status answered; a Go subscription key is required. |
 | Settings footer names a newer version | `brew upgrade --cask opencode-usage`. |
 
 ## Releasing
