@@ -56,8 +56,8 @@ struct UsageData {
     var weekSinceAt = Date()
     var monthSinceAt = Date()
     var todaySinceAt = Date()
-    // Percentages straight from the console's own meters, when opencode has a
-    // linked console workspace. nil means the console API numbers are used.
+    // The console's own percentages and reset times, taken from the Go plan
+    // status. nil means the usage API sums are what the panel shows.
     var meters: Meters?
     // Dollars and period from the Go plan's own status, when the key can read
     // it. nil is the normal case for a workspace without a subscription.
@@ -110,6 +110,7 @@ struct Plan {
     struct Meter {
         let used: Double
         let limit: Double
+        let resetsAt: Date?
 
         var fraction: Double { limit > 0 ? used / limit : 0 }
     }
@@ -152,9 +153,6 @@ struct Meters {
     var five: Meter
     var week: Meter
     var month: Meter
-    // Name of the console workspace the meter came from; also the only place
-    // the workspace is identified, so no org setting is needed.
-    var workspace: String?
 
     func meter(_ period: Period) -> Meter? {
         switch period {
@@ -221,12 +219,11 @@ enum Usage {
         }
     }
 
-    // The model list is labelled with docs display names, the usage rows carry
-    // API ids, so match them through the same normalisation the limits table
-    // uses. Comparing the strings directly silently shows "no usage" for every
-    // model.
+    // The model list is labelled with display names, the usage rows carry API
+    // ids, so match them through the same normalisation the limits table uses.
+    // Comparing the strings directly silently shows "no usage" for every model.
     static func spend(_ data: UsageData, name: String) -> ModelUsage? {
-        let key = Limits.normalize(name)
+        let key = Limits.id(for: name) ?? Limits.normalize(name)
         return data.models.first { Limits.normalize($0.id) == key }
     }
 
@@ -365,7 +362,15 @@ enum Usage {
 
     // Ask the CLI instead of reading its database: `auth export` is the
     // supported interface, and the sqlite schema changes between releases.
+    // Run once per launch: a refresh would otherwise spawn it every 60 minutes,
+    // and a rotated key only needs a restart.
+    private static let keyLock = NSLock()
+    private static var cachedKey: String?
+
     static func credential() throws -> String {
+        keyLock.lock()
+        defer { keyLock.unlock() }
+        if let cachedKey { return cachedKey }
         guard let cli = opencodeCLI() else {
             throw Failure("Could not find the `opencode` CLI. Install it with `brew install sst/tap/opencode`.")
         }
@@ -388,8 +393,8 @@ enum Usage {
         }
         for entry in entries where entry["integrationID"] as? String == "opencode-go" {
             guard let value = entry["value"] as? [String: Any] else { continue }
-            if let key = value["key"] as? String, !key.isEmpty { return key }
-            if let key = value["access"] as? String, !key.isEmpty { return key }
+            if let key = value["key"] as? String, !key.isEmpty { cachedKey = key; return key }
+            if let key = value["access"] as? String, !key.isEmpty { cachedKey = key; return key }
         }
         throw Failure("No OpenCode Go credential found. Run `opencode auth login`.")
     }
@@ -525,7 +530,11 @@ enum Usage {
                   let used = number(item["usedMicroCents"]),
                   let limit = number(item["limitMicroCents"])
             else { return nil }
-            return Plan.Meter(used: used / 100_000_000, limit: limit / 100_000_000)
+            return Plan.Meter(
+                used: used / 100_000_000,
+                limit: limit / 100_000_000,
+                resetsAt: (item["resetsAt"] as? String).flatMap(isoDate)
+            )
         }
 
         return Plan(
@@ -542,6 +551,23 @@ enum Usage {
         guard let url = URL(string: api + "/go/status") else { return nil }
         guard let body = try? await request(url, key: key) else { return nil }
         return plan(from: body)
+    }
+
+    // The plan status carries the same percentages the local CLI route used to
+    // report, so all three meters come from the one response.
+    static func meters(from plan: Plan) -> Meters? {
+        func meter(_ source: Plan.Meter?) -> Meters.Meter? {
+            guard let source else { return nil }
+            return Meters.Meter(
+                percent: (source.fraction * 100).rounded(),
+                resetsAt: source.resetsAt
+            )
+        }
+        guard let five = meter(plan.five),
+              let week = meter(plan.week),
+              let month = meter(plan.month)
+        else { return nil }
+        return Meters(five: five, week: week, month: month)
     }
 
     // cost-by-day leaves out days with no spend (and includes some free-model
@@ -634,8 +660,7 @@ enum Usage {
     }
 
     static func fetch() async throws -> UsageData {
-        // The key implies its workspace: the usage API needs no org header, and
-        // the meter reports which workspace it answered for.
+        // The key implies its workspace: the usage API needs no org header.
         let key = try credential()
 
         let now = Date()
@@ -689,65 +714,10 @@ enum Usage {
             data.lifetimeRequests += model.totalRequests
         }
         data.models = byId.values.sorted { $0.total > $1.total }
-        data.meters = metersFromCLI()
         data.credits = await creditStatus
         data.plan = await goStatus
+        data.meters = data.plan.flatMap { meters(from: $0) }
         data.days = await recentDays
-        return data
-    }
-
-    // MARK: - Console meters
-
-    // `opencode api` talks to the local server, which knows the console
-    // workspace's real meter (percent + reset time). Empty data means opencode
-    // is not signed into a console workspace, so callers fall back to spending.
-    static func metersFromCLI() -> Meters? {
-        return meters(from: cliJSON())
-    }
-
-    static func meters(from data: Data) -> Meters? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let info = root["data"] as? [String: Any],
-              let go = info["go"] as? [String: Any]
-        else { return nil }
-
-        func meter(_ key: String) -> Meters.Meter? {
-            guard let raw = go[key] as? [String: Any],
-                  let percent = number(raw["percent"])
-            else { return nil }
-            let resets = number(raw["resetsAt"]).map { Date(timeIntervalSince1970: $0 / 1000) }
-            return Meters.Meter(percent: percent, resetsAt: resets)
-        }
-
-        guard let five = meter("rolling"), let week = meter("weekly"), let month = meter("monthly") else {
-            return nil
-        }
-        let workspace = (info["workspace"] as? [String: Any])?["name"] as? String
-        return Meters(five: five, week: week, month: month, workspace: workspace)
-    }
-
-    static func cliJSON() -> Data {
-        // The CLI can come back empty right after launch (server still coming
-        // up), and a nil meter silently downgrades the whole panel to sums.
-        for attempt in 0..<2 {
-            let data = cliOnce()
-            if !data.isEmpty { return data }
-            if attempt == 0 { Thread.sleep(forTimeInterval: 1) }
-        }
-        return Data()
-    }
-
-    private static func cliOnce() -> Data {
-        guard let cli = opencodeCLI() else { return Data() }
-        let process = Process()
-        process.executableURL = cli
-        process.arguments = ["api", "GET", "/api/experimental/usage/limits"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = Pipe()
-        guard (try? process.run()) != nil else { return Data() }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
         return data
     }
 
@@ -778,7 +748,7 @@ enum Usage {
         if let credits = data.credits, let used = credits.usedFraction, let spent = credits.used, let basis = credits.basis {
             lines.append("credits used \(percent(used)) · \(money(spent)) of \(money(basis))")
         }
-        lines.append("limits \(Limits.count) models (\(Limits.isDynamic ? "docs" : "bundled"))")
+        lines.append("limits \(Limits.count) models (\(Limits.isDynamic ? "api" : "bundled"))")
         if let meter = data.meters?.five {
             lines.append("5h meter: \(percent(meter.value(.five))) from the console, resets \(meter.resetsAt?.description ?? "unknown")")
         } else {
@@ -790,9 +760,9 @@ enum Usage {
                     + "5h \(money(model.five)) total \(money(model.total)) \(model.totalRequests) req"
             )
         }
-        // The panel's "All models" list is labelled with docs display names, so
-        // dump the same join: a docs name that fails to find its API id shows
-        // up here as a missing row instead of "no usage" in the UI.
+        // The panel's "All models" list is labelled with display names, so dump
+        // the same join: a display name that fails to find its API id shows up
+        // here as a missing row instead of "no usage" in the UI.
         let listed = Limits.models().compactMap { name -> String? in
             guard let model = spend(data, name: name), model.month >= meaningful else { return nil }
             let limit = Limits.value(model: name).map(money) ?? "-"

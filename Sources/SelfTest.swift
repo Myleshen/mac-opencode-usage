@@ -31,7 +31,7 @@ enum SelfTest {
                 "totalCacheWrite1hTokens": "2000",
             ],
             [
-                "provider": "opencode-go", "model": "glm-5.3",
+                "provider": "opencode-go", "model": "deepseek-v4-pro",
                 "totalCostMicroCents": "1500000000",
                 "totalRequests": "10",
                 "totalInputTokens": "100",
@@ -107,9 +107,11 @@ enum SelfTest {
         check(Usage.describe(withCredits).contains("credits used 15% · $0.73 of $5.00"), "credits used line in dump")
 
         // Sorted by month-of-limit: 50/100 = 50%, then 15/15 = 100% would win,
-        // so check the 100% model comes first.
-        check(data.models.first?.id == "glm-5.3", "sorts by monthly utilization")
-        check(data.models.first?.limit == 15, "limit from go table")
+        // so check the 100% model comes first. Both limits are the same in the
+        // bundled table and in the live model list, so a daily refresh cannot
+        // flip this.
+        check(data.models.first?.id == "deepseek-v4-pro", "sorts by monthly utilization")
+        check(data.models.first?.limit == 15, "limit from the limits table")
         check(data.models.last?.limit == 100, "unknown-model limit")
 
         let top = Usage.top(data, .five)
@@ -132,19 +134,38 @@ enum SelfTest {
         check(Usage.stamp(later).hasSuffix(Usage.offset), "stamp names the zone")
         check(!Usage.stamp(later, zone: false).contains(Usage.offset), "zone can be left out")
 
-        // The console meter is authoritative when opencode has a linked
-        // workspace: parse percents and the reset instant, ignore everything else.
-        let meterJSON = Data("""
-        {"data":{"go":{"rolling":{"percent":37,"limited":false,"resetsAt":1762340000000},
-        "weekly":{"percent":63.5,"limited":false},
-        "monthly":{"percent":100,"limited":true,"resetsAt":1762400000000}},"budgets":[]}}
-        """.utf8)
-        let meters = Usage.meters(from: meterJSON)
-        check(meters?.five.percent == 37, "meter rolling percent")
-        check(meters?.week.percent == 63.5, "meter weekly percent")
-        check(meters?.five.resetsAt == Date(timeIntervalSince1970: 1_762_340_000), "meter resetsAt ms")
+        // The plan status is the only source of the console percentages now: the
+        // used/limit midpoint is the percent and the meter's own resetsAt rides
+        // along.
+        let meterStatus: [String: Any] = [
+            "access": [
+                "meters": [
+                    "fiveHour": [
+                        "limitMicroCents": "2000000000", "usedMicroCents": "740000000",
+                        "resetsAt": "2026-11-26T16:33:10.000Z",
+                    ],
+                    "week": ["limitMicroCents": "2000000000", "usedMicroCents": "1270000000"],
+                    "month": ["limitMicroCents": "10000000000", "usedMicroCents": "10000000000"],
+                ],
+            ],
+        ]
+        let meters = Usage.meters(from: Usage.plan(from: meterStatus)!)
+        check(meters?.five.percent == 37, "meter percent from the plan fraction")
+        check(meters?.week.percent == 64, "meter weekly percent rounds")
+        check(meters?.five.resetsAt == Usage.isoDate("2026-11-26T16:33:10.000Z"), "meter resetsAt from plan")
         check(meters?.week.resetsAt == nil, "missing resetsAt is nil")
         check(meters?.meter(.today) == nil, "today has no meter")
+
+        // 193978856 / 1200000000 is 16.16%, shown as the console's 16%.
+        let roundedMeters = Usage.meters(from: Plan(
+            five: .init(used: 1.93978856, limit: 12, resetsAt: nil),
+            week: .init(used: 0, limit: 1, resetsAt: nil),
+            month: .init(used: 0, limit: 1, resetsAt: nil),
+            renewsAt: nil,
+            payment: nil,
+            resumability: nil
+        ))
+        check(roundedMeters?.five.percent == 16, "meter percent rounds to a whole number")
 
         // `since` older than yesterday is ignored by the API, so the month list
         // must ask for calendar days instead.
@@ -162,8 +183,15 @@ enum SelfTest {
         metered.meters = meters
         check(abs((Usage.top(metered, .five)?.pct ?? 0) - 0.37) < 0.0001, "meter percent wins over spend")
         check(abs((Usage.top(data, .five)?.pct ?? 0) - 0.1) < 0.0001, "no meter falls back to spend")
-        check(Usage.meters(from: Data("{\"data\":null}".utf8)) == nil, "null data is no meter")
-        check(Usage.meters(from: Data("{}".utf8)) == nil, "missing go is no meter")
+        let halfPlan = Plan(
+            five: .init(used: 0, limit: 1, resetsAt: nil),
+            week: nil,
+            month: nil,
+            renewsAt: nil,
+            payment: nil,
+            resumability: nil
+        )
+        check(Usage.meters(from: halfPlan) == nil, "all three meters are required")
 
         // /go/status carries the dollars behind the meters and the plan's
         // period end; both are µ¢ strings and fractional-second ISO.
@@ -173,7 +201,10 @@ enum SelfTest {
             "access": [
                 "endsAt": "2026-11-30T13:56:20.000Z",
                 "meters": [
-                    "fiveHour": ["limitMicroCents": "1200000000", "usedMicroCents": "4018121"],
+                    "fiveHour": [
+                        "limitMicroCents": "1200000000", "usedMicroCents": "4018121",
+                        "resetsAt": "2026-11-26T16:33:10.000Z",
+                    ],
                     "month": ["limitMicroCents": "6000000000", "usedMicroCents": "1423656687"],
                 ],
             ],
@@ -183,6 +214,8 @@ enum SelfTest {
         check(plan?.month?.limit == 60, "plan month limit")
         check(abs((plan?.month?.fraction ?? 0) - 0.2373) < 0.001, "plan month fraction")
         check(plan?.week == nil, "missing meter is nil")
+        check(plan?.five?.resetsAt == Usage.isoDate("2026-11-26T16:33:10.000Z"), "fractional ISO meter reset parses")
+        check(plan?.month?.resetsAt == nil, "missing meter reset is nil")
         check(plan?.renewsAt != nil, "fractional ISO period end parses")
         check(plan?.payment == "link" && plan?.resumability == "renewing", "plan billing fields")
         check(Usage.plan(from: ["subscriberUserId": "acc"]) == nil, "status without access is no plan")
@@ -218,7 +251,7 @@ enum SelfTest {
         check(Usage.cap(unknown.models[0], .month) == nil, "no cap without a limit")
         check(Usage.top(unknown, .month) == nil, "no percentage without a limit")
 
-        // Assert the compiled fallback, not the live table: the docs fetch is
+        // Assert the compiled fallback, not the live table: the model list is
         // cached per user and grows whenever OpenCode ships a model, so tying
         // the test to its count fails on a machine that has refreshed since.
         check(Limits.bundled.count == 28, "28 models in the bundled Go table")
@@ -227,41 +260,32 @@ enum SelfTest {
         check(Limits.value(model: "deepseek-v4.1-flash") == 100, "go limit")
         check(Limits.value(model: "nope") == nil, "unknown model has no limit")
 
-        // Docs names and API ids must land on the same key, or a fetched table
-        // would never match the model ids the usage API returns.
+        // Display names and API ids must land on the same key, or a fetched
+        // table would never match the model ids the usage API returns.
         check(Limits.value(model: "DeepSeek V4.1 Flash") == Limits.value(model: "deepseek-v4.1-flash"),
-              "docs name matches API id")
+              "display name matches API id")
         check(Limits.normalize("Qwen3.8 Max (≤ 512K tokens)") == "qwen3-8-max", "variants share a key")
 
-        // The model list is labelled with docs display names while usage rows
-        // carry API ids; matching them by string equality showed "no usage" for
-        // every model, so pin the lookup that bridges the two.
-        check(Usage.spend(data, name: "DeepSeek V4.1 Flash")?.month == 50, "list finds spend by docs name")
+        // The model list is labelled with display names while usage rows carry
+        // API ids; matching them by string equality showed "no usage" for every
+        // model, so pin the lookup that bridges the two.
+        check(Usage.spend(data, name: "DeepSeek V4.1 Flash")?.month == 50, "list finds spend by display name")
         check(Usage.spend(data, name: "deepseek-v4.1-flash")?.month == 50, "list finds spend by API id")
         check(Usage.spend(data, name: "Nope") == nil, "list ignores unknown names")
 
-        // The docs table is fetched, so parse a slice shaped like the real page.
-        let fixture = """
-        <PlanTabs id="go-pricing" value="go">
-        <div slot="go">
-
-        | Model | Input | Output | Cached Read | Cached Write | Monthly limit |
-        | --- | --- | --- | --- | --- | --- |
-        | DeepSeek V4.1 Flash (Off-Peak) | $0.14 | $0.28 | $0.0028 | $0.14 | **$100** |
-        | DeepSeek V4.1 Flash (Peak) | $0.28 | $0.56 | $0.0056 | $0.28 | **$100** |
-        | Beam Free | $0 | $0 | $0 | $0 | **Unlimited**<br /><small>limited time</small> |
-        </div>
-        <div slot="go-plus">
-        | Model | Monthly limit |
-        | --- | --- |
-        | DeepSeek V4.1 Flash | **$200** |
-        </div>
-        </PlanTabs>
-        """
-        let parsed = Limits.parse(fixture)
-        check(parsed.count == 1, "one model after variants are merged and Unlimited is skipped")
-        check(parsed["deepseek-v4-1-flash"]?.limit == 100, "parsed limit from the go slot")
-        check(parsed["deepseek-v4-1-flash"]?.name == "DeepSeek V4.1 Flash", "parenthetical stripped from the name")
+        // The model list is public JSON: `go.monthly_usage.go` is the limit and
+        // `name` the display name. The free models carry no monthly usage.
+        let listed: [[String: Any]] = [
+            ["id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash",
+             "go": ["monthly_usage": ["go": 100, "go-plus": 200]]],
+            ["id": "glm-5.3", "name": "GLM-5.3", "go": ["monthly_usage": ["go": 200]]],
+            ["id": "beam-free", "name": "Beam Free", "go": ["training": false]],
+            ["id": "no-go", "name": "No Go"],
+        ]
+        let parsed = Limits.parse(listed)
+        check(parsed.count == 2, "models without a go limit are skipped")
+        check(parsed["deepseek-v4-1-flash"]?.limit == 100, "parsed go monthly limit")
+        check(parsed["deepseek-v4-1-flash"]?.name == "DeepSeek V4.1 Flash", "parsed display name")
 
         // Version comparison for the update nudge.
         check(UpdateCheck.newer(latest: "v1.0.13", current: "1.0.12"), "newer patch")

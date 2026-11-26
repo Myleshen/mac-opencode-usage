@@ -12,7 +12,7 @@ final class Store: ObservableObject {
     private var timer: Timer?
 
     var refreshMinutes: Int {
-        max(1, UserDefaults.standard.object(forKey: "refreshMinutes") as? Int ?? 10)
+        max(1, UserDefaults.standard.object(forKey: "refreshMinutes") as? Int ?? 60)
     }
 
 
@@ -62,13 +62,24 @@ final class Store: ObservableObject {
         busy = true
         defer { busy = false }
 
-        // Model limits come from the docs page; the daily cache keeps this cheap.
-        await Limits.refreshIfStale()
+        // The credential spawns a process and the JSON parsing is synchronous, so
+        // both fetch and the limits cache run off the main thread; only the
+        // published results come back here.
+        let result: Result<UsageData, Error> = await Task.detached {
+            // Model limits come from the public model list; the daily cache keeps this cheap.
+            await Limits.refreshIfStale()
+            do {
+                return .success(try await Usage.fetch())
+            } catch {
+                return .failure(error)
+            }
+        }.value
 
-        do {
-            data = try await Usage.fetch()
+        switch result {
+        case .success(let data):
+            self.data = data
             error = nil
-        } catch {
+        case .failure(let error):
             self.error = error.localizedDescription
         }
     }

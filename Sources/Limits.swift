@@ -1,11 +1,11 @@
 import Foundation
 
-// The Go model limits live in a pricing table on the docs site and move when
-// OpenCode ships models, so they are fetched and cached instead of compiled in.
-// The bundled table is the fallback when the page is unreachable or has been
-// restructured; a model missing from both has no percentage, only spend.
+// The Go model limits come from the public model list and move when OpenCode
+// ships models, so they are fetched and cached instead of compiled in. The
+// bundled table is the fallback when the list is unreachable or restructured;
+// a model missing from both has no percentage, only spend.
 enum Limits {
-    // Monthly limits for the Go plan, from https://opencode.ai/docs/go/.
+    // Bundled fallback: the Go plan's monthly limit per model, in dollars.
     static let bundled: [String: Double] = [
         "glm-5.3-flash": 60,
         "glm-5.3": 15,
@@ -37,7 +37,7 @@ enum Limits {
         "gemini-4-argon": 30,
     ]
 
-    private static let docs = URL(string: "https://opencode.ai/docs/go/")!
+    private static let listURL = URL(string: "https://opencode.ai/inference/go/v1/models")!
     private static let tableKey = "limitsTable"
     private static let namesKey = "limitsNames"
     private static let dateKey = "limitsFetched"
@@ -50,10 +50,17 @@ enum Limits {
 
     static func models() -> [String] { holder.names }
 
-    static func value(model: String) -> Double? { holder.table[normalize(model)] }
+    static func value(model: String) -> Double? {
+        guard let key = holder.key(for: model) else { return nil }
+        return holder.table[key]
+    }
 
-    // Docs say "DeepSeek V4.1 Flash", the API says "deepseek-v4.1-flash", so
-    // both sides go through the same shape before they are compared.
+    /// The table key for a display name or an API id, nil when neither is known.
+    static func id(for label: String) -> String? { holder.key(for: label) }
+
+    // The model list says "DeepSeek V4.1 Flash", the API says
+    // "deepseek-v4.1-flash", so both sides go through the same shape before
+    // they are compared.
     static func normalize(_ name: String) -> String {
         var text = stripParenthetical(name).lowercased()
         for (from, to) in [(".", "-"), (" ", "-"), ("_", "-")] {
@@ -69,65 +76,48 @@ enum Limits {
             .trimmingCharacters(in: .whitespaces)
     }
 
-    /// Refreshes from the docs page when the cached copy is a day old. A failed
-    /// fetch keeps whatever table we already have.
+    /// Refreshes from the public model list when the cached copy is a day old. A
+    /// failed fetch keeps whatever table we already have and still records the
+    /// attempt, so a broken source is retried once a day, not every refresh.
     static func refreshIfStale(force: Bool = false) async {
-        let last = UserDefaults.standard.object(forKey: dateKey) as? Date ?? .distantPast
+        let defaults = UserDefaults.standard
+        let last = defaults.object(forKey: dateKey) as? Date ?? .distantPast
         guard force || Date().timeIntervalSince(last) > maxAge else { return }
-        guard let parsed = await fetch() else { return }
+
+        let parsed = await fetch()
+        defaults.set(Date(), forKey: dateKey)
+        guard let parsed else { return }
 
         holder.replace(parsed)
-        let defaults = UserDefaults.standard
         defaults.set(parsed.mapValues(\.limit), forKey: tableKey)
         defaults.set(parsed.mapValues(\.name), forKey: namesKey)
-        defaults.set(Date(), forKey: dateKey)
     }
 
     private static func fetch() async -> [String: (name: String, limit: Double)]? {
-        var request = URLRequest(url: docs)
-        // The docs serve markdown to this accept header, which is far easier to
-        // parse than the rendered page.
-        request.setValue("text/markdown", forHTTPHeaderField: "Accept")
+        var request = URLRequest(url: listURL)
         request.timeoutInterval = 20
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
-              let markdown = String(data: data, encoding: .utf8)
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = body["data"] as? [[String: Any]]
         else { return nil }
-        let parsed = parse(markdown)
+        let parsed = parse(items)
         return parsed.isEmpty ? nil : parsed
     }
 
-    /// Pulls the monthly limit column out of the `go` pricing table.
-    static func parse(_ markdown: String) -> [String: (name: String, limit: Double)] {
-        var inPricing = false
-        var inGoSlot = false
+    /// Pulls the `go` monthly limit out of the public model list. The list's ids
+    /// are the ones the usage API returns, so they are the cache keys.
+    static func parse(_ items: [[String: Any]]) -> [String: (name: String, limit: Double)] {
         var table: [String: (name: String, limit: Double)] = [:]
-
-        for rawLine in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.contains("<PlanTabs id=\"go-pricing\"") { inPricing = true; continue }
-            guard inPricing else { continue }
-            if line.contains("</PlanTabs>") { break }
-            if line.hasPrefix("<div slot=\"") {
-                inGoSlot = line.contains("slot=\"go\"")
-                continue
-            }
-            guard inGoSlot, line.hasPrefix("|") else { continue }
-
-            let cells = line.split(separator: "|", omittingEmptySubsequences: false)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-            guard cells.count >= 8 else { continue } // empty, model, 4 prices, limit, empty
-            let name = stripParenthetical(cells[1])
-            guard let limit = dollars(cells[cells.count - 2]) else { continue }
-            table[normalize(name)] = (name, limit)
+        for item in items {
+            guard let id = item["id"] as? String,
+                  let go = item["go"] as? [String: Any],
+                  let usage = go["monthly_usage"] as? [String: Any],
+                  let limit = (usage["go"] as? NSNumber)?.doubleValue
+            else { continue }
+            table[normalize(id)] = (item["name"] as? String ?? id, limit)
         }
         return table
-    }
-
-    private static func dollars(_ cell: String) -> Double? {
-        let digits = cell.filter { $0.isNumber || $0 == "." }
-        guard !cell.lowercased().contains("unlimited"), !digits.isEmpty else { return nil }
-        return Double(digits)
     }
 
     private final class Holder: @unchecked Sendable {
@@ -155,6 +145,15 @@ enum Limits {
         var table: [String: Double] {
             lock.lock(); defer { lock.unlock() }
             return stored
+        }
+
+        // The model list's display name can carry a revision suffix ("… 1017")
+        // that the usage id does not, so a label is resolved to its key.
+        func key(for label: String) -> String? {
+            lock.lock(); defer { lock.unlock() }
+            let normalized = Limits.normalize(label)
+            if stored[normalized] != nil { return normalized }
+            return labels.first { Limits.normalize($0.value) == normalized }?.key
         }
 
         var count: Int {

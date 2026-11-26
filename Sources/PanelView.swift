@@ -44,7 +44,7 @@ struct PanelView: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("OpenCode usage\(Self.isDebug ? " (dev)" : "")").font(.system(size: 16, weight: .bold))
-                Text(store.data?.meters?.workspace.map { "\($0) · Go plan" } ?? "Go plan")
+                Text("Go plan")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -91,11 +91,11 @@ struct PanelView: View {
                 banner("Refresh failed; showing previous data.", detail: error)
             }
 
-            // Without a console session the numbers are our own sums, which can
+            // Without the plan's meters the numbers are our own sums, which can
             // differ from the console. Say so instead of looking equivalent.
             if data.meters == nil {
-                banner("No console session.",
-                       detail: "Showing rolling sums of the usage API. For the console's own percentages, run: opencode auth login \"OpenCode Console\" --method device")
+                banner("No plan meters.",
+                       detail: "Showing rolling sums of the usage API. The percentage cards come from the Go plan status, which this key could not read.")
             }
 
             // A model newer than the table, or a Go Plus/Teams account, would
@@ -434,7 +434,7 @@ struct PanelView: View {
 struct SettingsView: View {
     let store: Store
 
-    @AppStorage("refreshMinutes") private var refreshMinutes = 10
+    @AppStorage("refreshMinutes") private var refreshMinutes = 60
     @AppStorage("warning") private var warning = 80
     @AppStorage("critical") private var critical = 95
     @AppStorage("barFive") private var barFive = true
